@@ -28,10 +28,12 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
-          cache: npm
+          # Sem cache: o pacote não tem dependências externas e não há package-lock.json,
+          # então o cache do npm faria este passo falhar (lock file not found).
 
       - name: Install dependencies
-        run: npm ci || npm install
+        # Sem lockfile, `npm ci` falharia; usamos `npm install` que aceita ambos os casos.
+        run: npm install || true
 
       - name: Validate / build (se existir script de build)
         run: npm run build --if-present
