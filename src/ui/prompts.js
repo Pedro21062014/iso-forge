@@ -175,43 +175,67 @@ export function confirmItem({ title = '', initial = true } = {}) {
 export function inputPage({ title = '', placeholder = '', defaultValue = '', validate } = {}) {
   return new Promise((resolve) => {
     let value = defaultValue;
+    let errPending = false;
 
-    const render = () => {
+    const fieldText = () =>
+      value.length ? colors.white(value) : dim(placeholder || 'digite aqui...');
+
+    // Redesenha o bloco (título + campo [+ erro]) SEM duplicá-lo:
+    // primeiro sobe até a linha do título e limpa tudo abaixo, depois imprime de novo.
+    const render = (repaint = false) => {
+      const titleLines = title ? title.split('\n') : [];
+      hideCursor();
+      if (repaint) {
+        process.stdout.write(`\x1b[${titleLines.length}A\x1b[J`);
+      }
       let out = '';
-      if (title) out += colors.purple(bold('◈ ' + title)) + '\n';
-      out += '   ';
-      out += value.length ? colors.white(value) : dim(placeholder || 'digite aqui...');
-      process.stdout.write('\x1b[2K\r' + out);
+      for (const t of titleLines) out += colors.purple(bold('◈ ' + t)) + '\n';
+      out += '   ' + fieldText();
+      if (errPending) out += '\n   ' + colors.red('Entrada inválida. Tente novamente.');
+      process.stdout.write(out);
+      // reposiciona o cursor no fim do campo (após o texto digitado)
+      if (errPending) process.stdout.write('\x1b[1A'); // da linha de erro volta ao campo
+      process.stdout.write(`\x1b[${4 + value.length}G`);
+      showCursor();
     };
-    render();
+    render(false);
 
     const finish = (val) => {
       process.stdin.off('data', onData);
       process.stdin.setRawMode(false);
       process.stdin.pause();
       process.stdout.write('\n');
+      showCursor();
       resolve(val);
     };
 
     const onData = (chunk) => {
       const k = chunk.toString();
-      // Ignora sequências de escape/setas (ESC [...) para não vazarem para o campo
-      if (k.startsWith('\x1b')) return;
-      if (k === ENTER) {
+
+      // Apenas ESC puro = cancelar; sequências ESC[... (setas) são ignoradas
+      if (k === ESC) { finish(value); return; }
+      if (k.startsWith(ESC)) return;
+      if (k === CTRL_C) { process.exit(130); }
+
+      // ENTER (ou quebra de linha no fim do paste) = submeter
+      if (k === ENTER || k === '\n') {
         if (validate && !validate(value)) {
-          process.stdout.write('\n   ' + colors.red('Entrada inválida. Tente novamente.') + '\n');
-          render();
+          errPending = true;
+          render(true);
           return;
         }
         finish(value);
         return;
       }
-      if (k === BACKSPACE || k === '\b') { value = value.slice(0, -1); }
-      else if (k === CTRL_C) { process.exit(130); }
-      else if (k === ESC) { finish(value); return; }
-      else if (/^[\x20-\x7e]$/.test(k)) { value += k; }
-      process.stdout.write('\x1b[2K\r');
-      render();
+
+      // Colar ou digitação: o chunk pode conter vários caracteres de uma vez.
+      // Preserva os imprimíveis e trata backspace (inclusive em sequências).
+      let changed = false;
+      for (const ch of k) {
+        if (ch === '\x7f' || ch === '\b') { value = value.slice(0, -1); changed = true; }
+        else if (ch >= ' ' && ch !== '\x7f' && ch !== '\r' && ch !== '\n') { value += ch; changed = true; }
+      }
+      if (changed) { errPending = false; render(true); }
     };
     process.stdin.setRawMode(true);
     process.stdin.resume();
