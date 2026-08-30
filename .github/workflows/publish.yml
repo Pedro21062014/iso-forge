@@ -1,24 +1,24 @@
 name: Publish to npm
 
-# Publica o pacote automaticamente no npm quando:
-#  - uma tag de versão (ex.: v1.2.0) é criada, OU
-#  - algo é enviado à branch main com bump de versão no package.json
+# Publica o pacote automaticamente no npm (https://registry.npmjs.org)
+# sempre que uma tag de versão semântica for criada, ex.: `v1.2.0`.
+# Também pode ser disparado manualmente pela aba "Actions".
+#
+# ⚠️ IMPORTANTE: adicione um segredo no repositório antes de publicar:
+#   Settings → Secrets and variables → Actions → New repository secret
+#     Nome:  NPM_TOKEN
+#     Valor: seu token de acesso do npm (https://npmjs.com/settings/tokens)
 on:
   push:
     tags:
       - 'v*'
-    branches:
-      - main
-      - master
   workflow_dispatch: {}
-
-permissions:
-  contents: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,27 +33,16 @@ jobs:
       - name: Install dependencies
         run: npm ci || npm install
 
-      - name: Build / validate (se houver script de build)
+      - name: Validate / build (se existir script de build)
         run: npm run build --if-present
 
-      - name: Auto-bump na main (as tags fazem o release oficial)
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-        run: |
-          npm version patch --no-git-tag-version
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
-          git commit -m "chore: bump version [skip ci]" || echo "sem mudanças para commitar"
-          git push
-
-      - name: Publish ao npm
-        # NODE_AUTH_TOKEN vem do segredo NPM_TOKEN configurado no repositório
+      - name: Publicar no npm
+        # NODE_AUTH_TOKEN vem do segredo NPM_TOKEN configurado no repositório.
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Criar release de tag (opcional)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Criar release no GitHub (associada à tag)
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
