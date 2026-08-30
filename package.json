@@ -1,0 +1,33 @@
+{
+  "name": "iso-forge",
+  "version": "1.0.0",
+  "description": "Crie sua própria distribuição Linux (ISO) a partir do terminal. Escolha a base, o tema, os wallpapers, os aplicativos e muito mais — e gere sua ISO com logs e barra de progresso.",
+  "type": "module",
+  "bin": {
+    "iso-forge": "bin/iso-forge.js"
+  },
+  "main": "src/cli.js",
+  "files": [
+    "bin",
+    "src",
+    "assets"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "linux",
+    "iso",
+    "live", 
+    "distro",
+    "builder",
+    "cli",
+    "customization",
+    "remaster"
+  ],
+  "author": "Arena Agent",
+  "license": "MIT",
+  "scripts": {
+    "start": "node bin/iso-forge.js"
+  }
+}
