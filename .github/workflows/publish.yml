@@ -45,6 +45,9 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Criar release no GitHub (associada à tag)
+        # Só roda quando o run veio de uma tag. Em workflow_dispatch (main) não há
+        # tag, então este passo é pulado (seria o erro "GitHub Releases requires a tag").
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
