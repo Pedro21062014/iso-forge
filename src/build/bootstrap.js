@@ -84,7 +84,12 @@ function stream(cmd, logger) {
 async function bootstrapDebian({ base, arch, targetRoot, includePkgs, logger, pbar, sys }) {
   const suite = DEBIAN_SUITE[base] || 'bookworm';
   const mirror = DEBIAN_MIRROR[base] || DEBIAN_MIRROR.debian;
-  const inc = ['locales', 'tzdata', 'systemd', 'initramfs-tools', 'grub-pc-bin', 'grub-efi-amd64-bin', 'linux-image-amd64', 'squashfs-tools', ...includePkgs].filter(Boolean);
+  // IMPORTANTE: não colocar kernel/grub aqui. O --include do debootstrap só enxerga
+  // a componente `main` e o nome do kernel/grub difere por base (linux-image-amd64 no
+  // Debian vs linux-image-generic no Ubuntu). Usar o nome errado faz o debootstrap
+  // abortar ("Couldn't find these debs"). Kernel+GRUB são instalados DEPOIS via chroot.
+  const inc = ['locales', 'tzdata', 'systemd', 'initramfs-tools', 'squashfs-tools',
+    'rsync', 'apt-utils', 'dbus', 'ca-certificates', 'dirmngr', ...includePkgs].filter(Boolean);
   logger?.log(`${'▸'} debootstrap: baixando e instalando a base ${base} (suite ${suite}) — isto baixa vários GB e pode demorar.`, 'build');
 
   // debootstrap precisa de root (mknod) e de um local sem nodev
