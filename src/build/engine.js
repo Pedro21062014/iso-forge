@@ -13,7 +13,7 @@ import {
   DESKTOP_PKGS, APP_PKGS, KERNEL_PKGS, GRUB_PKGS,
   DEBOOTSTRAP_INCLUDE_SAFE, DEFAULT_DESKTOP_BY_BASE, DEFAULT_THEME_BY_BASE,
 } from '../presets.js';
-import { bootstrapBase, detectBootstrap, installPackages, configureRootfs, makeBootableISO, prepareChrootMounts, cleanupChrootMounts, BOOTSTRAP_TOOL, BUILD_TOOL_PKGS_BY_PM } from './bootstrap.js';
+import { bootstrapBase, detectBootstrap, installPackages, configureRootfs, makeBootableISO, prepareChrootMounts, cleanupChrootMounts, ensureChrootLocale, BOOTSTRAP_TOOL, BUILD_TOOL_PKGS_BY_PM } from './bootstrap.js';
 
 const pkg = (arr, v) => arr.find((x) => x.value === v)?.label || v;
 
@@ -215,6 +215,10 @@ export async function buildISO(config, { logger, sys, tools }) {
       // Re-monta /proc,/sys,/dev,/dev/pts no chroot (o debootstrap os desmonta).
       // Sem isso, postinsts como openjdk/libreoffice falham ("/dev/pts não montado").
       prepareChrootMounts(rootfs, logger);
+      // Gera o locale/base ANTES dos installs — o postinst do openjdk (via
+      // LibreOffice) e vários scripts falham com "Cannot set LC_*" se o locale
+      // ainda não existe (antes isso só era feito no configureRootfs, no fim).
+      await ensureChrootLocale(base, rootfs, resolvedLocale, logger);
     } else {
       // esqueleto: prepara estrutura mínima para a ISO compacta
       say('Criando projeto base (esqueleto)...', 'build');
@@ -234,7 +238,9 @@ export async function buildISO(config, { logger, sys, tools }) {
       const kernelPkgs = KERNEL_PKGS[base] || ['linux-image-amd64'];
       const grubPkgs = GRUB_PKGS[base] || ['grub-pc-bin', 'grub-efi-amd64-bin'];
       // casper dá suporte a boot "live" (root=live boot=live) a partir do ISO.
-      const livePkgs = (base === 'debian' || base === 'ubuntu' || base === 'mint') ? ['casper'] : [];
+      const livePkgs = (base === 'debian' || base === 'ubuntu' || base === 'mint')
+        ? (splash === 'on' ? ['casper', 'plymouth', 'plymouth-theme-script'] : ['casper'])
+        : [];
       const editionWeight = EDITIONS.find((e) => e.value === edition)?.weight || 2;
       const buildPkgs = editionWeight >= 3 ? ['build-essential', 'gcc', 'git', 'python3'] : [];
       say('Instalando kernel e carga de boot (GRUB)...', 'build');
@@ -265,6 +271,15 @@ export async function buildISO(config, { logger, sys, tools }) {
       // configura o sistema (locale/fuso já resolvidos: 'system' vira o real do host)
       await configureRootfs({ base, rootfs, name, locale: resolvedLocale, tz: resolvedTz, logger });
       await advance('config', 120);
+      // ---------- logos de boot e de sistema ----------
+      if (bootLogo || sysLogo) {
+        say('Aplicando logos (boot + sistema)...', 'build');
+        const logoDir = path.join(rootfs, 'usr', 'share', 'iso-forge');
+        fs.mkdirSync(logoDir, { recursive: true });
+        if (bootLogo) await resolveAsset(bootLogo, path.join(logoDir, 'boot-logo.png'), logger);
+        if (sysLogo) await resolveAsset(sysLogo, path.join(logoDir, 'system-logo.png'), logger);
+        await advance('config', 40);
+      }
       // Sempre desmontar antes do squashfs (senão o mksquashfs arquiva /proc,/sys,/dev).
       cleanupChrootMounts(rootfs);
     } else {
@@ -350,7 +365,7 @@ export async function buildISO(config, { logger, sys, tools }) {
     const isoPath = path.join(outRoot, fileName);
     let isoBuilt = false;
     if (mode === 'real') {
-      isoBuilt = await makeBootableISO({ rootfs, isoPath, name, logger });
+      isoBuilt = await makeBootableISO({ rootfs, isoPath, name, logger, squashPath, persistence });
     } else {
       // esqueleto: empacota apenas os arquivos de config como ISO de dados
       isoBuilt = makeMinimalIso(isoPath, buildDir, name);

@@ -245,10 +245,39 @@ function extractMissingPkgs(text) {
   return missing;
 }
 
+/**
+ * Gera os locales base DENTRO do chroot ANTES de instalar aplicativos pesados.
+ * O postinst do openjdk (puxado pelo LibreOffice) e vários scripts são sensíveis
+ * a locale e, se o locale não existir, falham com
+ * "locale: Cannot set LC_* to default locale". Antes isso só era feito no
+ * configureRootfs (que roda DEPOIS dos installs). Aqui geramos <locale> + C.UTF-8.
+ */
+export async function ensureChrootLocale(base, rootfs, locale, logger) {
+  if (base !== 'debian' && base !== 'ubuntu' && base !== 'mint') return;
+  const safeLoc = (locale && locale !== 'C' ? locale : 'C') + '.UTF-8';
+  try {
+    const cmd = `DEBIAN_FRONTEND=noninteractive bash -c "
+      echo '${safeLoc} UTF-8' > /etc/locale.gen;
+      echo 'C.UTF-8 UTF-8' >> /etc/locale.gen;
+      locale-gen >/dev/null 2>&1 || true;
+      update-locale LANG=${safeLoc} 2>/dev/null || true;
+    "`;
+    await chrootExec(rootfs, cmd, logger);
+  } catch { logger?.log('Aviso: não foi possível gerar o locale no chroot.', 'warn'); }
+}
+
+/** Detecta se a falha é um erro de CONFIGURAÇÃO (post-install) — os pacotes foram
+ *  extraídos mas ficaram unconfigured (ex.: cadeia openjdk/libreoffice). São
+ *  recuperáveis com dpkg --configure -a e NÃO matam o build. */
+function isConfigureError(text) {
+  return /dependency problems|leaving unconfigured|is not configured yet|post-installation script.*returned|Sub-process.*dpkg.*error|returned an error code|Could not create.*manager object|message bus/.test(text || '');
+}
+
 /** Instala pacotes dentro do rootfs via gerenciador da família, de forma
- *  RESILIENTE: habilita as componentes completas (universe/multiverse) e, se
- *  algum pacote não existir no repositório, pula só ele em vez de abortar o
- *  build inteiro. */
+ *  RESILIENTE: habilita as componentes completas (universe/multiverse), pula
+ *  pacote que não existir no repositório e, se a instalação sofrer erro de
+ *  CONFIGURAÇÃO (post-install, ex.: openjdk/libreoffice), tenta reparar com
+ *  dpkg --configure -a / apt-get -f em vez de abortar o build inteiro. */
 export async function installPackages({ base, rootfs, pkgs, logger }) {
   if (!pkgs.length) { logger?.log('Nenhum pacote adicional a instalar.', 'info'); return; }
   logger?.log(`${'▸'} Instalando ${pkgs.length} pacote(s) dentro do ISO: ${pkgs.join(', ')}`, 'build');
@@ -256,18 +285,32 @@ export async function installPackages({ base, rootfs, pkgs, logger }) {
     // garante que os pacotes em universe/multiverse fiquem localizáveis
     await enableFullRepos(base, rootfs, logger);
     let remaining = [...pkgs];
+    let configRetries = 0;
     while (remaining.length) {
       const cmd = `DEBIAN_FRONTEND=noninteractive apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y ${remaining.join(' ')}`;
       try {
         await chrootExec(rootfs, cmd, logger); // IMPORTANTE: aguardar (não rodar apt em paralelo - lock)
         return;
       } catch (e) {
-        const missing = extractMissingPkgs(e.message || '');
-        if (!missing.size) throw e; // falha real (rede, dependência...) — não engolir
-        const drop = [...missing];
-        logger?.log(`Pulos: pacote(s) não existente(s) no repositório da base: ${drop.join(', ')}`, 'warn');
-        remaining = remaining.filter((p) => !drop.some((m) => p === m || m.includes(p)));
-        if (!remaining.length) return;
+        const text = e.message || '';
+        const missing = extractMissingPkgs(text);
+        if (missing.size) {
+          const drop = [...missing];
+          logger?.log(`Pulos: pacote(s) não existente(s) no repositório da base: ${drop.join(', ')}`, 'warn');
+          remaining = remaining.filter((p) => !drop.some((m) => p === m || m.includes(p)));
+          if (!remaining.length) return;
+          continue;
+        }
+        // Erro de CONFIGURAÇÃO (post-install): reparar em vez de abortar.
+        if (isConfigureError(text) && configRetries < 2) {
+          configRetries++;
+          logger?.log('Configuração incompleta (post-install). Reparando com dpkg --configure -a...', 'warn');
+          try {
+            await chrootExec(rootfs, `DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive dpkg --configure -a`, logger);
+            continue;
+          } catch {}
+        }
+        throw e; // falha real e/ou não reparável
       }
     }
     logger?.log(`${'✔'} Pacotes instalados.`, 'ok');
@@ -303,55 +346,71 @@ export async function configureRootfs({ base, rootfs, name, locale, tz, logger }
 }
 
 /** Gera a ISO bootável a partir do rootfs (grub-mkrescue => El Torito BIOS + EFI). */
-export function makeBootableISO({ rootfs, isoPath, name, logger }) {
-  logger?.log('Gerando ISO bootável (GRUB + isolinux + EFI)...', 'build');
-  const isoDir = path.join(rootfs, 'isofiles');
-  fs.mkdirSync(isoDir, { recursive: true });
-  // Detecta o kernel/initrd REAIS presentes no rootfs (não usar glob — o GRUB não
-  // expande "*"). Se achar, gera um menu que boota direto no sistema da ISO.
+/** Gera um ISO bootavel (casper live) a partir do rootfs + squashfs do sistema.
+ *  Como o squashfs pode passar de 4 GB (limite do ISO 9660 nivel 1/2), usamos a
+ *  estrategia em 2 passos: (1) grub-mkrescue num ESQUELETO (so kernel+initrd+boot)
+ *  para gerar as imagens El Torito (BIOS + UEFI); (2) remontamos a ISO final com
+ *  xorriso '-as mkisofs -iso-level 3' (que aceita arquivos grandes) reusando
+ *  essas imagens de boot. Resultado: ISO hibrida bootavel, mesmo com > 4 GB. */
+export function makeBootableISO({ rootfs, isoPath, name, logger, squashPath, persistence = false }) {
+  logger?.log('Gerando ISO bootavel (GRUB + isolinux + EFI + casper live)...', 'build');
+  const buildDir = path.dirname(rootfs);
   const boot = path.join(rootfs, 'boot');
-  let vmlinuz = '';
-  let initrd = '';
+  let vmlinuzName = '', initrdName = '';
   try {
-    // Escolhe o kernel/initrd REAIS mais recentes (ignora os '.old' e os links 'vmlinuz').
     const pick = (arr) => arr.filter((f) => !f.endsWith('.old')).sort().pop() || arr.sort().pop();
     const kernels = fs.readdirSync(boot).filter((f) => f.startsWith('vmlinuz') && f !== 'vmlinuz');
-    if (kernels.length) vmlinuz = pick(kernels);
     const inits = fs.readdirSync(boot).filter((f) => f.startsWith('initrd.img') && f !== 'initrd.img');
-    if (inits.length) initrd = pick(inits);
+    if (kernels.length) vmlinuzName = pick(kernels);
+    if (inits.length) initrdName = pick(inits);
   } catch {}
-  const useReal = vmlinuz && initrd;
-  const bootLabel = vmlinuz ? vmlinuz.replace(/^vmlinuz-?/, '') : 'live';
-  const entry = useReal
-    ? `set root=(cd0)
-set timeout=5
-menuentry "${name} (ISO)" {
-  linux /boot/${vmlinuz} root=live boot=live rw quiet splash locale=pt_BR.UTF-8
-  initrd /boot/${initrd}
-}
-menuentry "${name} (Check mode)" {
-  linux /boot/${vmlinuz} root=live boot=live rw quiet splash check
-  initrd /boot/${initrd}
-}`
-    : `set timeout=5
+  const vmlinuzSrc = vmlinuzName ? path.join(boot, vmlinuzName) : path.join(boot, 'vmlinuz');
+  const initrdSrc = initrdName ? path.join(boot, initrdName) : path.join(boot, 'initrd.img');
+  const persistFlag = persistence ? ' persistent' : '';
+  const grubCfg = `set timeout=5
+set default=0
 menuentry "${name} (Live)" {
-  linux /boot/vmlinuz root=live rw quiet splash
+  linux /boot/vmlinuz boot=casper quiet splash${persistFlag}
   initrd /boot/initrd.img
-}`;
-  fs.writeFileSync(path.join(rootfs, 'boot', 'grub', 'grub.cfg'), `${entry}\n`);
-
-  // grub-mkrescue cria ISO híbrida com El Torito para BIOS e UEFI. Precisa de
-  // mtools instalado (mformat). Se não estiver, é instalado automaticamente pelo
-  // BUILD_TOOL_PKGS_BY_PM; em último caso avisamos.
-  try {
-    execSync(`sudo grub-mkrescue -o ${isoPath} ${rootfs}`, { stdio: 'inherit', timeout: 1200000 });
-    if (fs.existsSync(isoPath)) return true;
-  } catch {
-    logger?.log('grub-mkrescue falhou; tentando gerar ISO via xorriso (pode não bootar em UEFI).', 'warn');
-  }
-  // fallback: xorriso mkisofs simples
-  try {
-    execSync(`sudo xorriso -as mkisofs -o ${isoPath} -V "${name}" ${rootfs}`, { stdio: 'inherit', timeout: 1200000 });
-    return fs.existsSync(isoPath);
-  } catch { return false; }
 }
+menuentry "${name} (Check)" {
+  linux /boot/vmlinuz boot=casper quiet splash check${persistFlag}
+  initrd /boot/initrd.img
+}
+`;
+  // Passo 1: esqueleto -> imagens de boot via grub-mkrescue
+  const skel = path.join(buildDir, 'skel');
+  fs.rmSync(skel, { recursive: true, force: true });
+  fs.mkdirSync(path.join(skel, 'boot', 'grub'), { recursive: true });
+  fs.copyFileSync(vmlinuzSrc, path.join(skel, 'boot', 'vmlinuz'));
+  fs.copyFileSync(initrdSrc, path.join(skel, 'boot', 'initrd.img'));
+  fs.writeFileSync(path.join(skel, 'boot', 'grub', 'grub.cfg'), grubCfg);
+  const skelIso = path.join(buildDir, 'skel.iso');
+  let ok = false;
+  try { execSync(`sudo grub-mkrescue -o ${skelIso} ${skel}`, { stdio: 'inherit', timeout: 600000 }); ok = fs.existsSync(skelIso); } catch { ok = false; }
+  if (!ok) { logger?.log('grub-mkrescue falhou; ISO nao podera ser gerada.', 'err'); return false; }
+  // Passo 2: extrair imagens de boot + montar arvore final com o squashfs
+  const staging = path.join(buildDir, 'isofiles');
+  fs.rmSync(staging, { recursive: true, force: true });
+  fs.mkdirSync(staging, { recursive: true });
+  try { execSync(`xorriso -indev ${skelIso} -osirrox on -extract / ${staging}`, { stdio: 'ignore', timeout: 300000 }); } catch {}
+  try { execSync(`chmod -R u+w ${staging}`, { stdio: 'ignore', timeout: 60000 }); } catch {}
+  fs.mkdirSync(path.join(staging, 'casper'), { recursive: true });
+  if (squashPath && fs.existsSync(squashPath)) {
+    const dest = path.join(staging, 'casper', 'filesystem.squashfs');
+    try { fs.linkSync(squashPath, dest); } catch { fs.copyFileSync(squashPath, dest); }
+  }
+  try { fs.writeFileSync(path.join(staging, 'boot', 'grub', 'grub.cfg'), grubCfg); } catch {}
+  // monta a ISO final hibrida (BIOS + UEFI), suportando arquivos grandes
+  const mbr = fs.existsSync('/usr/lib/grub/i386-pc/boot_hybrid.img') ? '/usr/lib/grub/i386-pc/boot_hybrid.img' : '';
+  const mbrOpt = mbr ? `-isohybrid-mbr ${mbr}` : '';
+  try {
+    execSync(`sudo xorriso -as mkisofs -o ${isoPath} -V "${name}" -iso-level 3 -joliet ` +
+      `-b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table ` +
+      `-eltorito-alt-boot -e efi.img -no-emul-boot ${mbrOpt} ${staging}`, { stdio: 'inherit', timeout: 1200000 });
+    return fs.existsSync(isoPath);
+  } catch {
+    return false;
+  }
+}
+
