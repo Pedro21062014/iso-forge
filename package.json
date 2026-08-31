@@ -1,6 +1,6 @@
 {
   "name": "iso-forge",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Crie sua própria distribuição Linux (ISO) a partir do terminal. Escolha a base, o tema, os wallpapers, os aplicativos e muito mais — e gere sua ISO com logs e barra de progresso.",
   "type": "module",
   "bin": {

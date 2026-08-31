@@ -22,6 +22,7 @@ export const EDITIONS = [
 ];
 
 export const DESKTOPS = [
+  { value: 'system', label: 'Padrão do sistema', desc: 'Usa o desktop padrão da base escolhida (recomendado).' },
   { value: 'kde', label: 'KDE Plasma', desc: 'Moderno, bonito e altamente customizável. Mais pesado.' },
   { value: 'gnome', label: 'GNOME', desc: 'Simples, produtivo, foco em fluxo de trabalho.' },
   { value: 'xfce', label: 'XFCE', desc: 'Leve e estável. Ótimo para máquinas modestas.' },
@@ -35,6 +36,7 @@ export const DESKTOPS = [
 ];
 
 export const GLOBAL_THEMES = [
+  { value: 'system', label: 'Padrão do sistema', desc: 'Usa o tema padrão da base/desktop escolhido (recomendado).' },
   { value: 'adwaita-dark', label: 'Adwaita Dark', desc: 'Sombrio, limpo e neutro.' },
   { value: 'adwaita-light', label: 'Adwaita Light', desc: 'Claro, simples e moderno.' },
   { value: 'breeze-dark', label: 'Breeze Dark', desc: 'Tema padrão do KDE, azulado e escuro.' },
@@ -50,6 +52,7 @@ export const GLOBAL_THEMES = [
 ];
 
 export const WALLPAPERS = [
+  { value: 'system', label: 'Padrão do sistema', desc: 'Mantém o wallpaper padrão da base (não adiciona nada).', colorA: [70, 120, 180], colorB: [20, 30, 50] },
   { value: 'mountains', label: 'Montanhas (natural)', desc: 'Paisagem serena com gradiente.', colorA: [98, 130, 190], colorB: [30, 40, 70] },
   { value: 'abstract-gradient', label: 'Gradiente abstrato', desc: 'Cores fluidas e modernas.', colorA: [255, 100, 120], colorB: [80, 40, 160] },
   { value: 'minimal-lines', label: 'Linhas minimalistas', desc: 'Limpo e geométrico.', colorA: [40, 45, 60], colorB: [10, 12, 22] },
@@ -66,6 +69,7 @@ export const WALLPAPERS = [
 ];
 
 export const LOCKSCREEN_STYLES = [
+  { value: 'system', label: 'Padrão do sistema', desc: 'Usa a tela de bloqueio padrão do desktop escolhido.' },
   { value: 'blur', label: 'Blur (desfoque do fundo)', desc: 'Fundo desfocado com relógio grande.' },
   { value: 'cards', label: 'Cartões (widgets)', desc: 'Relógio, clima e notícias em cartões.' },
   { value: 'minimal', label: 'Minimalista', desc: 'Apenas relógio e campo de senha.' },
@@ -75,6 +79,7 @@ export const LOCKSCREEN_STYLES = [
 ];
 
 export const BOOT_THEMES = [
+  { value: 'system', label: 'Padrão do sistema', desc: 'Usa o tema de boot padrão da base.' },
   { value: 'grub-classic', label: 'GRUB clássico', desc: 'Texto e padrão imutável.' },
   { value: 'grub-modern', label: 'GRUB moderno', desc: 'Visual com imagem de fundo e tipografia.' },
   { value: 'grub-breeze', label: 'GRUB Breeze', desc: 'Estilo KDE.' },
@@ -110,6 +115,7 @@ export const CUSTOM_APPS = [
 ];
 
 export const KERNELS = [
+  { value: 'system', label: 'Padrão do sistema', desc: 'Usa o kernel padrão da base escolhida (recomendado e mais estável).' },
   { value: 'lts', label: 'Kernel LTS', desc: 'Longo suporte, máximo de estabilidade.' },
   { value: 'default', label: 'Kernel padrão', desc: 'Equilíbrio entre estabilidade e novos recursos.' },
   { value: 'zen', label: 'Kernel Zen', desc: 'Otimizado para uso no desktop e jogos.' },
@@ -118,6 +124,7 @@ export const KERNELS = [
 ];
 
 export const LOCALES = [
+  { value: 'system', label: 'Padrão do sistema', desc: 'Usa o idioma/locale padrão da base. Podemos detectar o seu depois.' },
   { value: 'pt_BR', label: 'Português (Brasil)' },
   { value: 'pt_PT', label: 'Português (Portugal)' },
   { value: 'en_US', label: 'English (US)' },
@@ -128,6 +135,7 @@ export const LOCALES = [
 ];
 
 export const TIMEZONES = [
+  { value: 'system', label: 'Padrão do sistema (auto)', desc: 'Detecta e usa o fuso horário da máquina atual (recomendado).' },
   { value: 'America/Sao_Paulo', label: 'São Paulo' },
   { value: 'America/Noronha', label: 'Fernando de Noronha' },
   { value: 'America/Manaus', label: 'Manaus' },
@@ -141,6 +149,7 @@ export const TIMEZONES = [
 ];
 
 export const COMPRESSION = [
+  { value: 'system', label: 'Padrão do sistema', desc: 'Usa a compressão padrão do squashfs (deixa a ferramenta decidir).' },
   { value: 'gzip', label: 'gzip (compatível)', desc: 'Mais compatível, menor compressão.' },
   { value: 'xz', label: 'xz (melhor)', desc: 'Alta compressão, build mais lento.' },
   { value: 'zstd', label: 'zstd (rápido)', desc: 'Muito rápido e boa compressão.' },
@@ -215,6 +224,20 @@ export const DESKTOP_PKGS = {
   },
 };
 
+/** Desktop padrão de cada base, usado quando o usuário escolhe "Padrão do sistema". */
+export const DEFAULT_DESKTOP_BY_BASE = {
+  debian: 'xfce', ubuntu: 'gnome', mint: 'cinnamon',
+  arch: 'kde', manjaro: 'kde', endeavouros: 'xfce',
+  fedora: 'gnome', opensuse: 'kde', void: 'xfce', alpine: 'xfce', gentoo: 'kde', nixos: 'gnome',
+};
+
+/** Tema global padrão de cada base. */
+export const DEFAULT_THEME_BY_BASE = {
+  debian: 'adwaita-dark', ubuntu: 'adwaita-dark', mint: 'adwaita-light',
+  arch: 'arc-dark', fedora: 'adwaita-dark', opensuse: 'breeze-dark',
+  void: 'nordic', alpine: 'nordic', gentoo: 'dracula', nixos: 'nord',
+};
+
 // Apps escolhidos no assistente -> pacote real, por base.
 export const APP_PKGS = {
   debian: {
@@ -257,6 +280,38 @@ export const APP_PKGS = {
     python3: ['python3'], 'gnome-terminal': ['gnome-terminal'],
   },
 };
+
+/** Nome do pacote de KERNEL por base.
+ *  ATENÇÃO: o nome difere entre bases — linux-image-amd64 (Debian) NÃO existe no
+ *  Ubuntu (que usa linux-image-generic). Incluir o nome errado faz o debootstrap
+ *  abortar ("Couldn't find these debs"). */
+export const KERNEL_PKGS = {
+  debian: ['linux-image-amd64'],
+  ubuntu: ['linux-image-generic'],
+  mint: ['linux-image-generic'],
+  arch: ['linux'],
+  fedora: ['kernel'],
+  opensuse: ['kernel-default'],
+};
+
+export const GRUB_PKGS = {
+  debian: ['grub-pc-bin', 'grub-efi-amd64-bin', 'grub2-common'],
+  ubuntu: ['grub-pc-bin', 'grub-efi-amd64-bin', 'grub2-common'],
+  mint: ['grub-pc-bin', 'grub-efi-amd64-bin', 'grub2-common'],
+  arch: ['grub', 'efibootmgr'],
+  fedora: ['grub2', 'grub2-efi', 'efibootmgr'],
+  opensuse: ['grub2', 'grub2-efi', 'efibootmgr'],
+};
+
+/** Pacotes universais que EXISTEM na componente main em todas as bases Debian-like
+ *  e que podem ir com segurança no --include do debootstrap.
+ *  NÃO coloque aqui kernel/grub/build-essential: o nome difere por base e o
+ *  --include só enxerga a componente main, o que torna o bootstrap frágil.
+ *  Esses pacotes são instalados depois via chroot (installPackages). */
+export const DEBOOTSTRAP_INCLUDE_SAFE = [
+  'locales', 'tzdata', 'systemd', 'initramfs-tools',
+  'squashfs-tools', 'rsync', 'apt-utils', 'dbus', 'ca-certificates', 'dirmngr',
+];
 
 export const DEFAULT_BASE_PKGS = {
   debian: ['systemd', 'locales', 'tzdata', 'bash', 'coreutils', 'initramfs-tools', 'linux-image-amd64', 'grub-pc-bin', 'grub-efi-amd64-bin', 'squashfs-tools', 'xorg-server', 'mesa-utils'],

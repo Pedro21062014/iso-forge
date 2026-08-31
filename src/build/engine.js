@@ -10,7 +10,8 @@ import {
   BASE_DISTROS, EDITIONS, DESKTOPS, GLOBAL_THEMES, WALLPAPERS,
   LOCKSCREEN_STYLES, BOOT_THEMES, CUSTOM_APPS, KERNELS,
   LOCALES, TIMEZONES, COMPRESSION,
-  DESKTOP_PKGS, APP_PKGS,
+  DESKTOP_PKGS, APP_PKGS, KERNEL_PKGS, GRUB_PKGS,
+  DEBOOTSTRAP_INCLUDE_SAFE, DEFAULT_DESKTOP_BY_BASE, DEFAULT_THEME_BY_BASE,
 } from '../presets.js';
 import { bootstrapBase, detectBootstrap, installPackages, configureRootfs, makeBootableISO, BOOTSTRAP_TOOL, BUILD_TOOL_PKGS_BY_PM } from './bootstrap.js';
 
@@ -114,6 +115,14 @@ export async function buildISO(config, { logger, sys, tools }) {
   const sudoAvailable = hasSudo();
   const boot = detectBootstrap();
 
+  // ----- resolve "Padrão do sistema" ('system') para valores concretos por base -----
+  const resolvedDesktop = (desktop === 'system') ? (DEFAULT_DESKTOP_BY_BASE[base] || 'xfce') : desktop;
+  const resolvedTheme = (theme === 'system') ? (DEFAULT_THEME_BY_BASE[base] || 'adwaita-dark') : theme;
+  const resolvedKernel = (kernel === 'system') ? (KERNEL_PKGS[base]?.[0] || 'linux-image-amd64') : kernel;
+  const resolvedCompression = (compression === 'system') ? '' : compression;
+  const resolvedTz = (tz === 'system') ? detectTimezone() : tz;
+  const resolvedLocale = (locale === 'system') ? detectLocale() : locale;
+
   // pesos
   const steps = {
     prepare: 3, tools: 2, bootstrap: 26, pkgs: 20, desktop: 10, theme: 4,
@@ -175,8 +184,11 @@ export async function buildISO(config, { logger, sys, tools }) {
     // ---------- bootstrap do sistema base ----------
     if (mode === 'real') {
       say(`Bootstrapando o sistema base "${pkg(BASE_DISTROS, base)}" (${arch})...`, 'build');
-      const baseMeta = DEFAULT_PKGS_BY_EDITION(edition, wallpapers, apps, desktop, theme, lockStyle, extraTools, base);
-      // bootstrap com pacotes base + kernel + ferramentas
+      // Só pacotes universais seguros vão no --include (a componente `main` de TODAS
+      // as bases Debian-like). Kernel/grub/build são instalados DEPOIS via chroot,
+      // porque o nome difere por base (linux-image-amd64 no Debian vs linux-image-generic
+      // no Ubuntu) — incluir o nome errado faz o debootstrap abortar.
+      const baseMeta = DEFAULT_PKGS_BY_EDITION(edition, resolvedDesktop, resolvedTheme, lockStyle, extraTools, base);
       const bootInclude = baseMeta.bootstrapIncludes;
       await bootstrapBase({
         base, arch, targetRoot: rootfs, includePkgs: bootInclude, logger, pbar, sys,
@@ -198,11 +210,19 @@ export async function buildISO(config, { logger, sys, tools }) {
     const wallDir = path.join(rootfs, 'usr', 'share', 'backgrounds', name.toLowerCase());
 
     if (mode === 'real') {
-      // instala o desktop (meta-pacote da base)
-      const desktopMeta = DESKTOP_PKGS[base]?.[desktop] || [];
+      // Kernel + GRUB pelo nome correto da base (linux-image-amd64 vs -generic, etc.)
+      const kernelPkgs = KERNEL_PKGS[base] || ['linux-image-amd64'];
+      const grubPkgs = GRUB_PKGS[base] || ['grub-pc-bin', 'grub-efi-amd64-bin'];
+      const editionWeight = EDITIONS.find((e) => e.value === edition)?.weight || 2;
+      const buildPkgs = editionWeight >= 3 ? ['build-essential', 'gcc', 'git', 'python3'] : [];
+      say('Instalando kernel e carga de boot (GRUB)...', 'build');
+      await installPackages({ base, rootfs, pkgs: [...kernelPkgs, ...grubPkgs, ...buildPkgs], logger });
+      await advance('pkgs', 160);
+      // instala o desktop (meta-pacote da base). 'system' já foi resolvido.
+      const desktopMeta = DESKTOP_PKGS[base]?.[resolvedDesktop] || [];
       const appPkgs = apps.flatMap((a) => APP_PKGS[base]?.[a] || []);
       const extraReal = extraTools.flatMap((t) => EXTRA_TOOLS_PKGS[base]?.[t] || []);
-      say(`Instalando desktop ${desktopLabel} (meta-pacote)...`, 'build');
+      say(`Instalando desktop ${pkg(DESKTOPS, resolvedDesktop)} (meta-pacote)...`, 'build');
       await installPackages({ base, rootfs, pkgs: desktopMeta, logger });
       await advance('desktop', 160);
       say('Pré-instalando aplicativos personalizados...', 'build');
@@ -216,8 +236,8 @@ export async function buildISO(config, { logger, sys, tools }) {
       // Então só agora transferimos a posse ao usuário, para o Node poder escrever
       // os arquivos de configuração (hostname, hosts, os-release, wallpapers, grub...).
       sudoChown(rootfs);
-      // configura o sistema
-      await configureRootfs({ base, rootfs, name, locale, tz, logger });
+      // configura o sistema (locale/fuso já resolvidos: 'system' vira o real do host)
+      await configureRootfs({ base, rootfs, name, locale: resolvedLocale, tz: resolvedTz, logger });
       await advance('config', 120);
     } else {
       say('Configurando sistema (esqueleto)...', 'build');
@@ -228,10 +248,11 @@ export async function buildISO(config, { logger, sys, tools }) {
     }
 
     // ---------- tema ----------
-    say(`Aplicando tema global: ${pkg(GLOBAL_THEMES, theme)}`, 'build');
-    const themeDir = path.join(rootfs, 'usr', 'share', 'themes', theme);
+    const themeLabel = pkg(GLOBAL_THEMES, resolvedTheme);
+    say(`Aplicando tema global: ${themeLabel}`, 'build');
+    const themeDir = path.join(rootfs, 'usr', 'share', 'themes', resolvedTheme);
     fs.mkdirSync(themeDir, { recursive: true });
-    fs.writeFileSync(path.join(themeDir, 'theme.conf'), `# Tema: ${pkg(GLOBAL_THEMES, theme)}\nfont=DejaVu Sans 10\n`);
+    fs.writeFileSync(path.join(themeDir, 'theme.conf'), `# Tema: ${themeLabel}\nfont=DejaVu Sans 10\n`);
     await advance('theme', 120);
 
     // ---------- wallpapers (gerados procedurais + personalizados) ----------
@@ -243,6 +264,8 @@ export async function buildISO(config, { logger, sys, tools }) {
     }
     let wd = 0;
     for (const w of allWalls) {
+      // 'system' = manter o wallpaper padrão da base; não gera nada extra
+      if (w === 'system') continue;
       const wp = WALLPAPERS.find((x) => x.value === w);
       const safe = String(w).replace(/[^a-zA-Z0-9._-]/g, '_');
       if (wp) {
@@ -262,12 +285,16 @@ export async function buildISO(config, { logger, sys, tools }) {
 
     // ---------- tela de bloqueio ----------
     say(`Aplicando tela de bloqueio: ${pkg(LOCKSCREEN_STYLES, lockStyle)}`, 'build');
-    fs.writeFileSync(path.join(rootfs, 'etc', 'lockscreen.conf'), `style=${lockStyle}\nblur=${lockStyle === 'blur' ? '1' : '0'}\n`);
+    if (lockStyle !== 'system') {
+      fs.writeFileSync(path.join(rootfs, 'etc', 'lockscreen.conf'), `style=${lockStyle}\nblur=${lockStyle === 'blur' ? '1' : '0'}\n`);
+    }
     await advance('lock', 80);
 
     // ---------- boot / splash ----------
     say(`Aplicando boot: ${pkg(BOOT_THEMES, bootTheme)} · Plymouth ${splash}`, 'build');
-    fs.writeFileSync(path.join(rootfs, 'etc', 'boot-theme'), `${bootTheme}\nplymouth=${splash}\n`);
+    if (bootTheme !== 'system') {
+      fs.writeFileSync(path.join(rootfs, 'etc', 'boot-theme'), `${bootTheme}\nplymouth=${splash}\n`);
+    }
     writeGrubConfig(path.join(rootfs, 'boot', 'grub', 'grub.cfg'), name, rootfs);
     writeIsolinuxConfig(path.join(rootfs, 'boot', 'isolinux', 'isolinux.cfg'), name);
     const manifestDir = path.join(rootfs, 'usr', 'share', 'iso-forge');
@@ -279,7 +306,7 @@ export async function buildISO(config, { logger, sys, tools }) {
     say(`Compactando o sistema (squashfs, método ${pkg(COMPRESSION, compression)})...`, 'build');
     const squashPath = path.join(buildDir, 'filesystem.squashfs');
     if (mode === 'real') {
-      const compFlag = { gzip: '-comp gzip', xz: '-comp xz', zstd: '-comp zstd', lzo: '-comp lzo' }[compression] || '';
+      const compFlag = { gzip: '-comp gzip', xz: '-comp xz', zstd: '-comp zstd', lzo: '-comp lzo' }[resolvedCompression] || '';
       try {
         execSync(`sudo mksquashfs ${rootfs} ${squashPath} ${compFlag} -no-progress`, { stdio: 'inherit', timeout: 3600000 });
         say(`Sistema compactado: ${formatMb(fs.statSync(squashPath).size)}.`, 'ok');
@@ -313,7 +340,8 @@ export async function buildISO(config, { logger, sys, tools }) {
     // ---------- finalize ----------
     say('Finalizando e assinando artifacts...', 'build');
     fs.writeFileSync(path.join(buildDir, 'iso-forge.config.json'), JSON.stringify(config, null, 2));
-    fs.writeFileSync(path.join(outRoot, fileName + '.info.txt'), summaryText(config, sys, mode, fs.existsSync(isoPath) ? formatMb(fs.statSync(isoPath).size) : '0'));
+    const showConfig = { ...config, desktop: resolvedDesktop, theme: resolvedTheme, kernel: resolvedKernel, compression: resolvedCompression || config.compression, locale: resolvedLocale, tz: resolvedTz };
+    fs.writeFileSync(path.join(outRoot, fileName + '.info.txt'), summaryText(showConfig, sys, mode, fs.existsSync(isoPath) ? formatMb(fs.statSync(isoPath).size) : '0'));
     try { execSync(`sha256sum '${isoPath}'`, { stdio: 'ignore', timeout: 200000 }); } catch {}
     await advance('config', 80);
 
@@ -341,17 +369,14 @@ export async function buildISO(config, { logger, sys, tools }) {
 
 // ---------------- helpers ----------------
 
-/** Pacotes base + extras por edição.
- *  ATENÇÃO: o `--include` do debootstrap só encontra pacotes do repositório MÍNIMO
- *  da suíte. Pacotes de desktop/xorg/mesa precisam ser instalados DEPOIS via chroot
- *  (installPackages), que enxerga o repositório completo. Por isso aqui colocamos
- *  apenas o essencial (kernel, initramfs, grub, squashfs, locales). */
-function DEFAULT_PKGS_BY_EDITION(edition, wallpapers, apps, desktop, theme, lockStyle, extraTools, base) {
-  const weight = EDITIONS.find((e) => e.value === edition)?.weight || 2;
-  const basePkgs = ['locales', 'tzdata', 'systemd', 'initramfs-tools',
-    'grub-pc-bin', 'grub-efi-amd64-bin', 'linux-image-amd64', 'squashfs-tools', 'rsync', 'apt-utils'];
-  const editionExtra = weight >= 3 ? ['build-essential', 'gcc', 'git', 'python3'] : [];
-  return { bootstrapIncludes: [...basePkgs, ...editionExtra] };
+/** Pacotes base seguros para o --include do debootstrap.
+ *  Vamos usar apenas DEBOOTSTRAP_INCLUDE_SAFE (universais, existentes na componente
+ *  `main` de qualquer base Debian-like). Kernel/grub/build-essential são instalados
+ *  depois via chroot (installPackages), já que o nome difere por base. */
+function DEFAULT_PKGS_BY_EDITION(edition, desktop, theme, lockStyle, extraTools, base) {
+  // Apenas pacotes universais seguros no --include do debootstrap.
+  // build-essential (meta-pacote pesado) é instalado DEPOIS via chroot, se edição core.
+  return { bootstrapIncludes: [...DEBOOTSTRAP_INCLUDE_SAFE] };
 }
 
 const EXTRA_TOOLS_PKGS = {
@@ -425,6 +450,28 @@ function summaryText(config, sys, mode, sz) {
 }
 
 // ---------------- generators PNG procedurais (ver ./png.js) ----------------
+
+/** Detecta o fuso horário do host (para o "Padrão do sistema"). */
+function detectTimezone() {
+  try {
+    if (fs.existsSync('/etc/timezone')) return fs.readFileSync('/etc/timezone', 'utf8').trim();
+    if (process.env.TZ && process.env.TZ.trim()) return process.env.TZ.trim();
+    // fallback via Intl
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz && tz !== 'UTC') return tz;
+  } catch {}
+  return 'America/Sao_Paulo';
+}
+
+/** Detecta o locale do host (para o "Padrão do sistema"). */
+function detectLocale() {
+  try {
+    const env = process.env.LANG || process.env.LC_ALL || process.env.LC_CTYPE || '';
+    const m = /^([a-zA-Z]{2}_[A-Z]{2})/.exec(env);
+    if (m) return m[1];
+  } catch {}
+  return 'en_US';
+}
 
 /** Transfere a posse dos arquivos do rootfs para o usuário atual (via sudo). */
 function sudoChown(rootfs) {

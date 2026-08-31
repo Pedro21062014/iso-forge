@@ -72,6 +72,24 @@ iso-forge --help     # ajuda
 iso-forge --version  # versão
 ```
 
+### 🌐 Opções "Padrão do sistema"
+
+Em quase todas as escolhas você pode selecionar **"Padrão do sistema"** (no topo da lista), que deixa a base/desktop decidir em vez de forçar:
+
+| Config | "Padrão do sistema" |
+|---|---|
+| **Desktop** | usa o desktop padrão da base (Debian→XFCE, Ubuntu→GNOME, Mint→Cinnamon, Arch→KDE...) |
+| **Tema** | usa o tema padrão da base/desktop |
+| **Kernel** | usa o kernel padrão da base (mais estável) |
+| **Wallpapers** | mantém o wallpaper padrão da base (não adiciona nada) |
+| **Tela de bloqueio** | usa o padrão do desktop escolhido |
+| **Boot** | usa o tema de boot padrão da base |
+| **Idioma / Locale** | detecta e usa o idioma da sua máquina |
+| **Hora / Fuso** | **detecta automaticamente** o fuso da sua máquina |
+| **Compressão** | usa a compressão padrão do squashfs |
+
+Isso garante que você também pode montar um sistema 100% "de fábrica", sem forçar temas.
+
 ### 🖥️ O que a ISO realmente contém (build REAL)
 
 Diferente de ferramentas que só geram um "esqueleto", o **iso-forge faz um bootstrap real**:
