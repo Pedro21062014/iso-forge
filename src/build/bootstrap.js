@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -34,14 +34,14 @@ export const BOOTSTRAP_TOOL = {
  * do usuário) o que faltar: debootstrap, squashfs, grub e xorriso.
  */
 export const BUILD_TOOL_PKGS_BY_PM = {
-  apt: { cmd: 'sudo apt-get update && sudo apt-get install -y', pkgs: 'debootstrap squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso' },
-  'apt-get': { cmd: 'sudo apt-get update && sudo apt-get install -y', pkgs: 'debootstrap squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso' },
-  pacman: { cmd: 'sudo pacman -S --noconfirm', pkgs: 'debootstrap squashfs-tools grub libisoburn' },
-  dnf: { cmd: 'sudo dnf install -y', pkgs: 'debootstrap squashfs-tools grub2 xorriso' },
-  yum: { cmd: 'sudo yum install -y', pkgs: 'debootstrap squashfs-tools grub2 xorriso' },
-  zypper: { cmd: 'sudo zypper install -y', pkgs: 'debootstrap squashfs-tools grub2 xorriso' },
-  apk: { cmd: 'sudo apk add', pkgs: 'debootstrap squashfs-tools xorriso' },
-  emerge: { cmd: 'sudo emerge --ask=y', pkgs: 'debootstrap squashfs-tools xorriso' },
+  apt: { cmd: 'sudo apt-get update && sudo apt-get install -y', pkgs: 'debootstrap squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso mtools' },
+  'apt-get': { cmd: 'sudo apt-get update && sudo apt-get install -y', pkgs: 'debootstrap squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso mtools' },
+  pacman: { cmd: 'sudo pacman -S --noconfirm', pkgs: 'debootstrap squashfs-tools grub libisoburn mtools' },
+  dnf: { cmd: 'sudo dnf install -y', pkgs: 'debootstrap squashfs-tools grub2 xorriso mtools' },
+  yum: { cmd: 'sudo yum install -y', pkgs: 'debootstrap squashfs-tools grub2 xorriso mtools' },
+  zypper: { cmd: 'sudo zypper install -y', pkgs: 'debootstrap squashfs-tools grub2 xorriso mtools' },
+  apk: { cmd: 'sudo apk add', pkgs: 'debootstrap squashfs-tools xorriso mtools' },
+  emerge: { cmd: 'sudo emerge --ask=y', pkgs: 'debootstrap squashfs-tools xorriso mtools' },
 };
 
 export const DEBIAN_SUITE = {
@@ -76,10 +76,29 @@ export async function bootstrapBase({ base, arch, targetRoot, includePkgs = [], 
   throw new Error('Nenhum método de bootstrap suportado.');
 }
 
+/** Executa um comando externo transmitindo a saída AO VIVO para o terminal E
+ *  capturando-a para diagnóstico. Se o comando falhar, grava o log em arquivo e
+ *  lança um erro com o trecho final do log — para que o usuário veja o MOTIVO
+ *  real da falha (o execSync com 'inherit' escondia isso, mostrando só
+ *  "Command failed: <comando>"). */
 function stream(cmd, logger) {
-  // executa com stdout ao vivo (para o usuário ver o progresso do apt/debootstrap)
-  execSync(cmd, { stdio: 'inherit', timeout: 3600000 });
+  return new Promise((resolve, reject) => {
+    const child = spawn('/bin/bash', ['-c', cmd], { timeout: 3600000 });
+    let buf = [];
+    const tail = () => buf.slice(-60).join('\n');
+    child.stdout.on('data', (d) => { const s = d.toString(); buf.push(s); process.stdout.write(s); });
+    child.stderr.on('data', (d) => { const s = d.toString(); buf.push(s); process.stdout.write(s); });
+    child.on('error', (e) => reject(new Error('Falha ao iniciar comando: ' + e.message)));
+    child.on('close', (code) => {
+      if (code === 0) return resolve();
+      const err = new Error(`✖ O comando falhou com exit code ${code}.\n\n${tail()}`);
+      err.tail = tail();
+      err.exitCode = code;
+      reject(err);
+    });
+  });
 }
+
 
 async function bootstrapDebian({ base, arch, targetRoot, includePkgs, logger, pbar, sys }) {
   const suite = DEBIAN_SUITE[base] || 'bookworm';
@@ -94,7 +113,7 @@ async function bootstrapDebian({ base, arch, targetRoot, includePkgs, logger, pb
 
   // debootstrap precisa de root (mknod) e de um local sem nodev
   const cmd = `sudo debootstrap --arch=${arch} --variant=minbase --include=${inc.filter((p, i, a) => a.indexOf(p) === i).join(',')} --no-check-gpg ${suite} ${targetRoot} ${mirror}`;
-  stream(cmd, logger);
+  await stream(cmd, logger);
   logger?.log(`${'✔'} Base ${base} bootstrapada (rootfs real).`, 'ok');
   return targetRoot;
 }
@@ -103,7 +122,7 @@ async function bootstrapArch({ base, arch, targetRoot, includePkgs, logger, pbar
   logger?.log(`${'▸'} pacstrap: instalando base Arch (${base}).`, 'build');
   const basePkgs = ['base', 'linux', 'linux-firmware', 'grub', 'efibootmgr', 'squashfs-tools', ...includePkgs].filter(Boolean);
   const cmd = `sudo pacstrap -C /dev/null ${targetRoot} ${basePkgs.join(' ')}`;
-  stream(cmd, logger);
+  await stream(cmd, logger);
   logger?.log(`${'✔'} Base ${base} bootstrapada.`, 'ok');
   return targetRoot;
 }
@@ -112,19 +131,18 @@ async function bootstrapDnf({ base, arch, targetRoot, includePkgs, logger, pbar,
   logger?.log(`${'▸'} dnf --installroot: instalando base ${base}.`, 'build');
   const release = base === 'fedora' ? '--releasever=40' : '--releasever=15.5';
   const cmd = `sudo dnf --installroot=${targetRoot} ${release} --releasever=${release.includes('releasever=') ? release.split('=')[1] : ''} groupinstall "${base === 'fedora' ? '@core' : 'base'}" -y ${includePkgs.join(' ')}`;
-  stream(cmd, logger);
+  await stream(cmd, logger);
   logger?.log(`${'✔'} Base ${base} bootstrapada.`, 'ok');
   return targetRoot;
 }
 
-/** Roda um comando DENTRO do rootfs (chroot). */
+/** Roda um comando DENTRO do rootfs (chroot), capturando o motivo real da falha. */
 export function chrootExec(rootfs, cmd, logger) {
-  try {
-    execSync(`sudo chroot ${rootfs} /bin/bash -c "${cmd.replace(/"/g, '\\"')}"`, { stdio: 'inherit', timeout: 3600000 });
-  } catch (e) {
-    logger?.err(`Falha ao executar no chroot: ${cmd} — ${e?.message || e}`);
+  const full = `sudo chroot ${rootfs} /bin/bash -c "${cmd.replace(/"/g, '\\"')}"`;
+  return stream(full, logger).catch((e) => {
+    logger?.err(`Falha ao executar no chroot: ${cmd.split('&&')[0]} — ${e.message.split('\n').slice(-8).join('\n')}`);
     throw e;
-  }
+  });
 }
 
 /** Instala pacotes dentro do rootfs via gerenciador da família. */
@@ -133,13 +151,13 @@ export async function installPackages({ base, rootfs, pkgs, logger }) {
   logger?.log(`${'▸'} Instalando ${pkgs.length} pacote(s) dentro do ISO: ${pkgs.join(', ')}`, 'build');
   if (base === 'debian' || base === 'ubuntu' || base === 'mint') {
     const cmd = `DEBIAN_FRONTEND=noninteractive apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y ${pkgs.join(' ')}`;
-    chrootExec(rootfs, cmd, logger);
+    await chrootExec(rootfs, cmd, logger); // IMPORTANTE: aguardar para não rodar apt em paralelo (lock)
   } else if (base === 'arch' || base === 'manjaro' || base === 'endeavouros') {
     const cmd = `pacman -Sy --noconfirm ${pkgs.join(' ')}`;
-    chrootExec(rootfs, cmd, logger);
+    await chrootExec(rootfs, cmd, logger);
   } else {
     const cmd = `dnf install -y ${pkgs.join(' ')}`;
-    chrootExec(rootfs, cmd, logger);
+    await chrootExec(rootfs, cmd, logger);
   }
   logger?.log(`${'✔'} Pacotes instalados.`, 'ok');
 }
@@ -164,29 +182,56 @@ export async function configureRootfs({ base, rootfs, name, locale, tz, logger }
   } catch {}
 }
 
-/** Gera a ISO bootável a partir do rootfs (isolinux+efi via grub-mkrescue/xorriso). */
+/** Gera a ISO bootável a partir do rootfs (grub-mkrescue => El Torito BIOS + EFI). */
 export function makeBootableISO({ rootfs, isoPath, name, logger }) {
-  logger?.log('Gerando ISO bootável (GRUB + isolinux)...', 'build');
-  // Cria o arquivo de boot do GRUB
+  logger?.log('Gerando ISO bootável (GRUB + isolinux + EFI)...', 'build');
   const isoDir = path.join(rootfs, 'isofiles');
   fs.mkdirSync(isoDir, { recursive: true });
-  fs.writeFileSync(path.join(rootfs, 'boot', 'grub', 'grub.cfg'), `set timeout=5
-menuentry "${name} (Live)" {
-  linux /boot/vmlinuz-* root=live rw quiet splash
-  initrd /boot/initrd.img-*
-}
-`);
-  // usa grub-mkrescue para criar ISO híbrida (BIOS + EFI)
-  const tool = hasTool('grub-mkrescue');
-  const grubEmu = tool ? 'grub-mkrescue' : 'xorriso';
+  // Detecta o kernel/initrd REAIS presentes no rootfs (não usar glob — o GRUB não
+  // expande "*"). Se achar, gera um menu que boota direto no sistema da ISO.
+  const boot = path.join(rootfs, 'boot');
+  let vmlinuz = '';
+  let initrd = '';
   try {
-    execSync(`sudo ${grubEmu} -o ${isoPath} ${rootfs}`, { stdio: 'inherit', timeout: 1200000 });
-    return fs.existsSync(isoPath);
+    // Escolhe o kernel/initrd REAIS mais recentes (ignora os '.old' e os links 'vmlinuz').
+    const pick = (arr) => arr.filter((f) => !f.endsWith('.old')).sort().pop() || arr.sort().pop();
+    const kernels = fs.readdirSync(boot).filter((f) => f.startsWith('vmlinuz') && f !== 'vmlinuz');
+    if (kernels.length) vmlinuz = pick(kernels);
+    const inits = fs.readdirSync(boot).filter((f) => f.startsWith('initrd.img') && f !== 'initrd.img');
+    if (inits.length) initrd = pick(inits);
+  } catch {}
+  const useReal = vmlinuz && initrd;
+  const bootLabel = vmlinuz ? vmlinuz.replace(/^vmlinuz-?/, '') : 'live';
+  const entry = useReal
+    ? `set root=(cd0)
+set timeout=5
+menuentry "${name} (ISO)" {
+  linux /boot/${vmlinuz} root=live boot=live rw quiet splash locale=pt_BR.UTF-8
+  initrd /boot/${initrd}
+}
+menuentry "${name} (Check mode)" {
+  linux /boot/${vmlinuz} root=live boot=live rw quiet splash check
+  initrd /boot/${initrd}
+}`
+    : `set timeout=5
+menuentry "${name} (Live)" {
+  linux /boot/vmlinuz root=live rw quiet splash
+  initrd /boot/initrd.img
+}`;
+  fs.writeFileSync(path.join(rootfs, 'boot', 'grub', 'grub.cfg'), `${entry}\n`);
+
+  // grub-mkrescue cria ISO híbrida com El Torito para BIOS e UEFI. Precisa de
+  // mtools instalado (mformat). Se não estiver, é instalado automaticamente pelo
+  // BUILD_TOOL_PKGS_BY_PM; em último caso avisamos.
+  try {
+    execSync(`sudo grub-mkrescue -o ${isoPath} ${rootfs}`, { stdio: 'inherit', timeout: 1200000 });
+    if (fs.existsSync(isoPath)) return true;
   } catch {
-    // fallback: xorriso -as mkisofs simples
-    try {
-      execSync(`sudo xorriso -as mkisofs -o ${isoPath} -V "${name}" ${rootfs}`, { stdio: 'inherit', timeout: 1200000 });
-      return fs.existsSync(isoPath);
-    } catch { return false; }
+    logger?.log('grub-mkrescue falhou; tentando gerar ISO via xorriso (pode não bootar em UEFI).', 'warn');
   }
+  // fallback: xorriso mkisofs simples
+  try {
+    execSync(`sudo xorriso -as mkisofs -o ${isoPath} -V "${name}" ${rootfs}`, { stdio: 'inherit', timeout: 1200000 });
+    return fs.existsSync(isoPath);
+  } catch { return false; }
 }

@@ -181,6 +181,18 @@ export async function buildISO(config, { logger, sys, tools }) {
     }
     await advance('tools', 120);
 
+    // ---------- pré-checagem antes do bootstrap REAL ----------
+    if (mode === 'real') {
+      const preflight = preflightChecks(outRoot, rootfs, sudoAvailable);
+      for (const w of preflight.warnings) say(w, 'warn');
+      // IMPORTANTE: preflight.fatal é um array; verificar .length (array vazio é truthy em JS)
+      if (preflight.fatal.length) {
+        say(colors.red('✖ Pré-checagem bloqueou o build REAL: ') + preflight.fatal.join('; '), 'err');
+        say('Corrija o problema acima e rode o iso-forge de novo.', 'warn');
+        return { isoPath: null, built: false, mode: 'skeleton' };
+      }
+    }
+
     // ---------- bootstrap do sistema base ----------
     if (mode === 'real') {
       say(`Bootstrapando o sistema base "${pkg(BASE_DISTROS, base)}" (${arch})...`, 'build');
@@ -213,10 +225,12 @@ export async function buildISO(config, { logger, sys, tools }) {
       // Kernel + GRUB pelo nome correto da base (linux-image-amd64 vs -generic, etc.)
       const kernelPkgs = KERNEL_PKGS[base] || ['linux-image-amd64'];
       const grubPkgs = GRUB_PKGS[base] || ['grub-pc-bin', 'grub-efi-amd64-bin'];
+      // casper dá suporte a boot "live" (root=live boot=live) a partir do ISO.
+      const livePkgs = (base === 'debian' || base === 'ubuntu' || base === 'mint') ? ['casper'] : [];
       const editionWeight = EDITIONS.find((e) => e.value === edition)?.weight || 2;
       const buildPkgs = editionWeight >= 3 ? ['build-essential', 'gcc', 'git', 'python3'] : [];
       say('Instalando kernel e carga de boot (GRUB)...', 'build');
-      await installPackages({ base, rootfs, pkgs: [...kernelPkgs, ...grubPkgs, ...buildPkgs], logger });
+      await installPackages({ base, rootfs, pkgs: [...kernelPkgs, ...grubPkgs, ...livePkgs, ...buildPkgs], logger });
       await advance('pkgs', 160);
       // instala o desktop (meta-pacote da base). 'system' já foi resolvido.
       const desktopMeta = DESKTOP_PKGS[base]?.[resolvedDesktop] || [];
@@ -450,6 +464,36 @@ function summaryText(config, sys, mode, sz) {
 }
 
 // ---------------- generators PNG procedurais (ver ./png.js) ----------------
+
+/** Pré-checagens amigáveis antes de um bootstrap REAL. Detecta problemas comuns de
+ *  ambiente que fazem o debootstrap falhar de forma opaca. */
+function preflightChecks(outRoot, rootfs, sudoAvailable) {
+  const warnings = [];
+  const fatal = [];
+  try {
+    // 1) espaço em disco no diretório de saída (bootstrap + squashfs precisam de ~4GB)
+    const df = execSync(`df -k --output=avail '${outRoot}' 2>/dev/null || df -k '${outRoot}'`, { encoding: 'utf8', timeout: 8000 });
+    const mb = parseInt(df.split('\n').filter((l) => /^\s*\d/.test(l)).pop().trim(), 10);
+    if (!Number.isNaN(mb) && mb < 3 * 1024 * 1024) {
+      fatal.push(`Espaço em disco insuficiente em ${outRoot} (${(mb / 1024).toFixed(1)} GB livre; precisa de ~4 GB).`);
+    } else if (!Number.isNaN(mb) && mb < 6 * 1024 * 1024) {
+      warnings.push(`Atenção: apenas ${(mb / 1024).toFixed(1)} GB livres em ${outRoot}. O build REAL pode precisar de ~4 GB.`);
+    }
+  } catch {}
+  try {
+    // 2) sistema de arquivos com restrição (nodev) que impede o debootstrap de criar device nodes
+    const fs = execSync(`stat -f -c %T '${rootfs}' 2>/dev/null || true`, { encoding: 'utf8', timeout: 5000 }).trim();
+    if (fs) warnings.push(`Sistema de arquivos de destino: ${fs}.`);
+  } catch {}
+  if (!sudoAvailable) {
+    fatal.push('sudo não está disponível. O debootstrap precisa de root.');
+  } else {
+    // 3) sudo pede senha (não interativo)? Avisa que será solicitada
+    try { execSync('sudo -n true 2>/dev/null', { stdio: 'ignore', timeout: 8000 }); }
+    catch { warnings.push('sudo pedirá a sua senha durante o build (considere `sudo -v` antes).'); }
+  }
+  return { warnings, fatal };
+}
 
 /** Detecta o fuso horário do host (para o "Padrão do sistema"). */
 function detectTimezone() {
