@@ -12,7 +12,7 @@ import {
   LOCALES, TIMEZONES, COMPRESSION,
   DESKTOP_PKGS, APP_PKGS,
 } from '../presets.js';
-import { bootstrapBase, detectBootstrap, installPackages, configureRootfs, makeBootableISO, BOOTSTRAP_TOOL } from './bootstrap.js';
+import { bootstrapBase, detectBootstrap, installPackages, configureRootfs, makeBootableISO, BOOTSTRAP_TOOL, BUILD_TOOL_PKGS_BY_PM } from './bootstrap.js';
 
 const pkg = (arr, v) => arr.find((x) => x.value === v)?.label || v;
 
@@ -50,6 +50,56 @@ async function askInstallIsoTool(logger, packageManager, hasSudoFlag) {
   } catch (e) {
     logger?.err(`Não foi possível instalar o ${packageManager.pkgName}: ${e?.message || e}`);
     return null;
+  }
+}
+
+/**
+ * Detecta se falta o debootstrap (ou ferramentas de build) e PEDE PERMISSÃO ao
+ * usuário para instalá-los automaticamente (via gerenciador de pacotes + sudo).
+ * Retorna true se ficou tudo pronto para um build REAL; false caso contrário.
+ */
+async function askInstallBootstrapTool(logger, packageManager, hasSudoFlag, base) {
+  const style = BUILD_TOOL_PKGS_BY_PM[packageManager?.pkg];
+  if (!style) {
+    logger?.warn('Nenhum gerenciador de pacotes reconhecido. Instale manualmente: debootstrap (ou pacstrap/dnf) + squashfs-tools + grub + xorriso.');
+    return false;
+  }
+  if (!hasSudoFlag) {
+    logger?.warn('sudo não encontrado. Instale manualmente o debootstrap e as demais ferramentas de build.');
+    return false;
+  }
+  logger?.log(`${colors.orange(bold('Para criar um sistema REAL, precisamos de ferramentas de build (debootstrap/squashfs/grub/xorriso).'))}`, 'warn');
+  logger?.log(`Encontramos o seu gerenciador de pacotes (${packageManager.label}).`, 'info');
+  logger?.blank();
+  logger?.clearFooter();
+  const wantInstall = await confirmItem({
+    title: `Quer que eu instale automaticamente: "${style.pkgs}"? (pode pedir a senha do sudo)`,
+  });
+  if (!wantInstall) {
+    logger?.log('Ok — seguiremos no modo projeto (ISO compacta, não bootável).', 'info');
+    return false;
+  }
+  const installCmd = `${style.cmd} ${style.pkgs}`;
+  logger?.log(`Executando: ${installCmd}`, 'run');
+  logger?.clearFooter();
+  logger?.blank();
+  try {
+    execSync(installCmd, { stdio: 'inherit', timeout: 1800000 });
+    logger?.log(`${colors.green('✔ Ferramentas de build instaladas.')}`, 'ok');
+    // re-detecta o bootstrap
+    const now = detectBootstrap();
+    logger?.log(`Disponível agora: debootstrap=${now.debootstrap} · squashfs=${hasTool('mksquashfs')} · xorriso=${hasTool('xorriso')}`, 'ok');
+    const okBoot = now.debootstrap || now.pacstrap || now.dnf;
+    if (okBoot) {
+      logger?.log(`${colors.green('✔ Agora podemos criar um sistema REAL.')}`, 'ok');
+      return true;
+    }
+    logger?.warn('Instalação feita, mas o bootstrap ainda não está disponível. Verifique manualmente.');
+    return false;
+  } catch (e) {
+    logger?.err(`Não foi possível instalar as ferramentas: ${e?.message || e}`);
+    logger?.log('Você pode instalar manualmente e rodar de novo, ou seguir no modo projeto.', 'info');
+    return false;
   }
 }
 
@@ -98,15 +148,27 @@ export async function buildISO(config, { logger, sys, tools }) {
     await advance('prepare', 120);
 
     // ---------- decidir o modo (real vs esqueleto) ----------
-    const mode = (!canBootstrap || !tool) ? 'skeleton' : 'real';
+    let mode = (canBootstrap && tool) ? 'real' : 'skeleton';
     if (mode === 'skeleton') {
-      say(colors.orange(bold('⚠ SEM BOOTSTRAP DISPONÍVEL — modo "projeto" (ISO compacta, não bootável).')), 'warn');
-      say('Para gerar uma ISO REAL com o sistema completo, instale o debootstrap (Debian/Ubuntu/Mint) e tenha sudo:', 'warn');
-      say('   sudo apt install debootstrap   # Debian/Ubuntu', 'info');
-      say('O resultado ainda será criado, mas é o ESPELHO do projeto, não o sistema de verdade.', 'warn');
-    } else {
+      // Se falta o debootstrap/ferramentas, PEDE PERMISSÃO para instalar automaticamente.
+      say(colors.orange(bold('⚠ SEM FERRAMENTAS DE BUILD (debootstrap pacstrap/dnf) PARA CRIAR UM SISTEMA REAL.')), 'warn');
+      say('Sem isso, só conseguimos gerar o ESPELHO do projeto (ISO compacta).', 'warn');
+      const ok = await askInstallBootstrapTool(logger, packageManager, sudoAvailable, base);
+      if (ok) {
+        mode = tool ? 'real' : 'skeleton';
+        if (mode === 'real') {
+          say(colors.green(bold('✔ Ferramentas disponíveis — modo REAL ativado!')), 'ok');
+        }
+      }
+    }
+    if (mode === 'real') {
       say(colors.green(bold(`✔ Modo REAL ativo: bootstrap via ${tool} + squashfs + ISO bootável.`)), 'ok');
       say(`A base "${pkg(BASE_DISTROS, base)}" será baixada e instalada de verdade. Isso baixa vários GB e demora.`, 'info');
+    } else {
+      say(colors.orange(bold('⚠ Modo "projeto" (ISO compacta, não bootável).')), 'warn');
+      say('Instale debootstrap (ou pacstrap/dnf) e aceite a instalação automática para gerar a ISO real.', 'warn');
+      say('   sudo apt install debootstrap   # Debian/Ubuntu', 'info');
+      say('O resultado ainda será criado, mas é o ESPELHO do projeto, não o sistema de verdade.', 'warn');
     }
     await advance('tools', 120);
 

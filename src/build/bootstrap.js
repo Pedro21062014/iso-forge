@@ -28,6 +28,22 @@ export const BOOTSTRAP_TOOL = {
   fedora: 'dnf', opensuse: 'dnf',
 };
 
+/**
+ * Pacotes de ferramentas de build necessários, por gerenciador de pacotes do
+ * HOST. Usado pelo iso-forge para instalar automaticamente (com a permissão
+ * do usuário) o que faltar: debootstrap, squashfs, grub e xorriso.
+ */
+export const BUILD_TOOL_PKGS_BY_PM = {
+  apt: { cmd: 'sudo apt-get update && sudo apt-get install -y', pkgs: 'debootstrap squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso' },
+  'apt-get': { cmd: 'sudo apt-get update && sudo apt-get install -y', pkgs: 'debootstrap squashfs-tools grub-pc-bin grub-efi-amd64-bin xorriso' },
+  pacman: { cmd: 'sudo pacman -S --noconfirm', pkgs: 'debootstrap squashfs-tools grub libisoburn' },
+  dnf: { cmd: 'sudo dnf install -y', pkgs: 'debootstrap squashfs-tools grub2 xorriso' },
+  yum: { cmd: 'sudo yum install -y', pkgs: 'debootstrap squashfs-tools grub2 xorriso' },
+  zypper: { cmd: 'sudo zypper install -y', pkgs: 'debootstrap squashfs-tools grub2 xorriso' },
+  apk: { cmd: 'sudo apk add', pkgs: 'debootstrap squashfs-tools xorriso' },
+  emerge: { cmd: 'sudo emerge --ask=y', pkgs: 'debootstrap squashfs-tools xorriso' },
+};
+
 export const DEBIAN_SUITE = {
   debian: 'bookworm', ubuntu: 'noble', mint: 'virginia',
 };
