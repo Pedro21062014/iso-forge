@@ -13,7 +13,7 @@ import {
   DESKTOP_PKGS, APP_PKGS, KERNEL_PKGS, GRUB_PKGS,
   DEBOOTSTRAP_INCLUDE_SAFE, DEFAULT_DESKTOP_BY_BASE, DEFAULT_THEME_BY_BASE,
 } from '../presets.js';
-import { bootstrapBase, detectBootstrap, installPackages, configureRootfs, makeBootableISO, BOOTSTRAP_TOOL, BUILD_TOOL_PKGS_BY_PM } from './bootstrap.js';
+import { bootstrapBase, detectBootstrap, installPackages, configureRootfs, makeBootableISO, prepareChrootMounts, cleanupChrootMounts, BOOTSTRAP_TOOL, BUILD_TOOL_PKGS_BY_PM } from './bootstrap.js';
 
 const pkg = (arr, v) => arr.find((x) => x.value === v)?.label || v;
 
@@ -212,6 +212,9 @@ export async function buildISO(config, { logger, sys, tools }) {
       });
       await advance('bootstrap', 160);
       say(`${colors.green('✔')} Sistema base pronto em ${rootfs}.`, 'ok');
+      // Re-monta /proc,/sys,/dev,/dev/pts no chroot (o debootstrap os desmonta).
+      // Sem isso, postinsts como openjdk/libreoffice falham ("/dev/pts não montado").
+      prepareChrootMounts(rootfs, logger);
     } else {
       // esqueleto: prepara estrutura mínima para a ISO compacta
       say('Criando projeto base (esqueleto)...', 'build');
@@ -254,10 +257,16 @@ export async function buildISO(config, { logger, sys, tools }) {
       // O apt-get dentro do chroot recria arquivos como root quando instala pacotes.
       // Então só agora transferimos a posse ao usuário, para o Node poder escrever
       // os arquivos de configuração (hostname, hosts, os-release, wallpapers, grub...).
+      // ANTES do chown: desmontar o chroot (chown -R num bind /dev é perigoso).
+      cleanupChrootMounts(rootfs);
       sudoChown(rootfs);
+      // Re-monta para os comandos de config via chroot (update-initramfs etc.).
+      prepareChrootMounts(rootfs, logger);
       // configura o sistema (locale/fuso já resolvidos: 'system' vira o real do host)
       await configureRootfs({ base, rootfs, name, locale: resolvedLocale, tz: resolvedTz, logger });
       await advance('config', 120);
+      // Sempre desmontar antes do squashfs (senão o mksquashfs arquiva /proc,/sys,/dev).
+      cleanupChrootMounts(rootfs);
     } else {
       say('Configurando sistema (esqueleto)...', 'build');
       fs.writeFileSync(path.join(rootfs, 'etc', 'desktop-env'), `${desktop}\n`);
@@ -382,6 +391,9 @@ export async function buildISO(config, { logger, sys, tools }) {
     say(colors.red('✖ Erro durante o build: ' + (err?.message || err)), 'err');
     return { isoPath: null, built: false };
   } finally {
+    // Segurança: sempre desmonta o chroot (mesmo em caso de erro), para não
+    // deixar /proc,/sys,/dev bind-mounted em um diretório que vamos apagar.
+    cleanupChrootMounts(rootfs);
     if (logger) logger.clearFooter();
   }
 }

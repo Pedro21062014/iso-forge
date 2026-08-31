@@ -18,7 +18,9 @@ export function detectBootstrap() {
 }
 
 function hasTool(t) {
-  try { execSync(`command -v ${t} 2>/dev/null`, { stdio: 'ignore', timeout: 5000 }); return true; } catch { return false; }
+  // Ferramentas como debootstrap/grub-mkrescue costumam viver em /usr/sbin, que
+  // nem sempre está no PATH do usuário. Procuramos também nesses diretórios.
+  try { execSync(`command -v ${t} 2>/dev/null || command -v /usr/sbin/${t} 2>/dev/null || command -v /usr/local/sbin/${t} 2>/dev/null || command -v /sbin/${t} 2>/dev/null`, { stdio: 'ignore', timeout: 5000 }); return true; } catch { return false; }
 }
 
 /** Mapeia base -> ferramenta de bootstrap utilizável na máquina atual. */
@@ -152,6 +154,38 @@ async function bootstrapDnf({ base, arch, targetRoot, includePkgs, logger, pbar,
   return targetRoot;
 }
 
+/**
+ * O debootstrap desmonta /proc, /sys, /dev, /dev/pts e /run ao terminar o
+ * segundo estágio. Sem eles, alguns postinst (ex.: openjdk/libreoffice) falham
+ * com "Can not write log (Is /dev/pts mounted?)" / "Failed to connect to
+ * system message bus". Esta função re-monta esses filesystems dentro do chroot
+ * (espelhando o ambiente do 2º estágio do debootstrap). Idempotente.
+ */
+export function prepareChrootMounts(rootfs, logger) {
+  const d = rootfs;
+  const script = `set -e
+mkdir -p ${d}/proc ${d}/sys ${d}/dev ${d}/dev/pts ${d}/run ${d}/run/lock ${d}/run/systemd ${d}/var/run
+mountpoint -q ${d}/proc     || mount -t proc proc ${d}/proc
+mountpoint -q ${d}/sys      || mount -t sysfs sysfs ${d}/sys
+mountpoint -q ${d}/dev      || mount --bind /dev ${d}/dev
+mountpoint -q ${d}/dev/pts  || mount -t devpts devpts ${d}/dev/pts
+`;
+  try {
+    execSync(`sudo bash -c '${script}'`, { stdio: 'inherit', timeout: 60000 });
+  } catch (e) {
+    logger?.log(`Aviso: não foi possível montar parte do chroot (${e.message.split('\n').pop()}). Alguns pacotes pesados podem falhar ao configurar.`, 'warn');
+  }
+}
+
+/** Desmonta os filesystems de chroot montados por prepareChrootMounts.
+ *  Deve rodar ANTES do sudoChown (chown -R num bind /dev é perigoso) e ANTES do
+ *  mksquashfs (senão arquiva /proc,/sys,/dev). */
+export function cleanupChrootMounts(rootfs) {
+  const d = rootfs;
+  const script = `umount ${d}/dev/pts 2>/dev/null; umount ${d}/dev 2>/dev/null; umount ${d}/proc 2>/dev/null; umount ${d}/sys 2>/dev/null; true`;
+  try { execSync(`sudo bash -c '${script}'`, { stdio: 'ignore', timeout: 60000 }); } catch {}
+}
+
 /** Roda um comando DENTRO do rootfs (chroot), capturando o motivo real da falha. */
 export function chrootExec(rootfs, cmd, logger) {
   const full = `sudo chroot ${rootfs} /bin/bash -c "${cmd.replace(/"/g, '\\"')}"`;
@@ -161,21 +195,91 @@ export function chrootExec(rootfs, cmd, logger) {
   });
 }
 
-/** Instala pacotes dentro do rootfs via gerenciador da família. */
+/**
+ * O debootstrap só configura a componente `main` do repositório. Vários apps
+ * (vlc, libreoffice, gnome-software, timeshift...) vivem nas componentes
+ * `universe`/`multiverse` (Ubuntu/Mint) ou `contrib`/`non-free` (Debian).
+ * Esta função adiciona um arquivo de sources com as componentes completas e
+ * roda apt-get update, para que o apt consiga localizar esses pacotes.
+ */
+export async function enableFullRepos(base, rootfs, logger) {
+  if (base !== 'debian' && base !== 'ubuntu' && base !== 'mint') return;
+  const suite = DEBIAN_SUITE[base] || 'bookworm';
+  const mirror = (DEBIAN_MIRROR[base] || DEBIAN_MIRROR.debian).replace(/\/+$/, '');
+  let extra = '';
+  if (base === 'ubuntu') {
+    // archive.ubuntu.com serve noble, -updates e -backports; a SEGURANÇA fica
+    // em security.ubuntu.com (não existe 'ubuntu-security' no archive).
+    extra = `deb ${mirror} ${suite} main restricted universe multiverse
+deb ${mirror} ${suite}-updates main restricted universe multiverse
+deb ${mirror} ${suite}-backports main restricted universe multiverse
+deb https://security.ubuntu.com/ubuntu ${suite}-security main restricted universe multiverse
+`;
+  } else if (base === 'debian') {
+    const comps = 'main contrib non-free non-free-firmware';
+    extra = `deb ${mirror} ${suite} ${comps}
+deb ${mirror} ${suite}-updates ${comps}
+deb ${mirror} ${suite}-backports ${comps}
+deb http://security.debian.org/debian-security ${suite}-security ${comps}
+`;
+  }
+  if (!extra) return; // mint: espelho já traz main/universe
+  // IMPORTANTE: neste ponto o rootfs ainda é root-owned (o chown ao usuário só
+  // acontece após os installs), então NÃO dá para usar fs.writeFileSync aqui.
+  // Gravamos o arquivo DENTRO do chroot, via root.
+  const b64 = Buffer.from(extra).toString('base64');
+  const cmd = `mkdir -p /etc/apt/sources.list.d && echo ${b64} | base64 -d > /etc/apt/sources.list.d/iso-forge-full.list`;
+  await chrootExec(rootfs, cmd, logger);
+}
+
+/** Extrai os nomes de pacotes que o apt disse não encontrar ("Unable to locate
+ *  package X" / "Package 'X' has no installation candidate"). */
+function extractMissingPkgs(text) {
+  const missing = new Set();
+  if (!text) return missing;
+  let m;
+  const reLocate = /Unable to locate package\s+(\S+)/g;
+  while ((m = reLocate.exec(text))) missing.add(m[1]);
+  const reCand = /has no installation candidate(?:\s+for\s+|[^\n]*?\s)package\s+([^\s'']+)|Package '([^']+)' has no installation candidate/g;
+  while ((m = reCand.exec(text))) missing.add(m[1] || m[2]);
+  return missing;
+}
+
+/** Instala pacotes dentro do rootfs via gerenciador da família, de forma
+ *  RESILIENTE: habilita as componentes completas (universe/multiverse) e, se
+ *  algum pacote não existir no repositório, pula só ele em vez de abortar o
+ *  build inteiro. */
 export async function installPackages({ base, rootfs, pkgs, logger }) {
   if (!pkgs.length) { logger?.log('Nenhum pacote adicional a instalar.', 'info'); return; }
   logger?.log(`${'▸'} Instalando ${pkgs.length} pacote(s) dentro do ISO: ${pkgs.join(', ')}`, 'build');
   if (base === 'debian' || base === 'ubuntu' || base === 'mint') {
-    const cmd = `DEBIAN_FRONTEND=noninteractive apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y ${pkgs.join(' ')}`;
-    await chrootExec(rootfs, cmd, logger); // IMPORTANTE: aguardar para não rodar apt em paralelo (lock)
+    // garante que os pacotes em universe/multiverse fiquem localizáveis
+    await enableFullRepos(base, rootfs, logger);
+    let remaining = [...pkgs];
+    while (remaining.length) {
+      const cmd = `DEBIAN_FRONTEND=noninteractive apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y ${remaining.join(' ')}`;
+      try {
+        await chrootExec(rootfs, cmd, logger); // IMPORTANTE: aguardar (não rodar apt em paralelo - lock)
+        return;
+      } catch (e) {
+        const missing = extractMissingPkgs(e.message || '');
+        if (!missing.size) throw e; // falha real (rede, dependência...) — não engolir
+        const drop = [...missing];
+        logger?.log(`Pulos: pacote(s) não existente(s) no repositório da base: ${drop.join(', ')}`, 'warn');
+        remaining = remaining.filter((p) => !drop.some((m) => p === m || m.includes(p)));
+        if (!remaining.length) return;
+      }
+    }
+    logger?.log(`${'✔'} Pacotes instalados.`, 'ok');
   } else if (base === 'arch' || base === 'manjaro' || base === 'endeavouros') {
     const cmd = `pacman -Sy --noconfirm ${pkgs.join(' ')}`;
     await chrootExec(rootfs, cmd, logger);
+    logger?.log(`${'✔'} Pacotes instalados.`, 'ok');
   } else {
     const cmd = `dnf install -y ${pkgs.join(' ')}`;
     await chrootExec(rootfs, cmd, logger);
+    logger?.log(`${'✔'} Pacotes instalados.`, 'ok');
   }
-  logger?.log(`${'✔'} Pacotes instalados.`, 'ok');
 }
 
 /** Configura o rootfs (hostname, locale, tz, initramfs). */
