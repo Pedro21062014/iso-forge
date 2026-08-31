@@ -151,6 +151,11 @@ export async function buildISO(config, { logger, sys, tools }) {
 
     // ---------- preparar dirs ----------
     say(`Preparando diretórios em: ${buildDir}`, 'build');
+    // IMPORTANTE: se uma tentativa anterior falhou, o rootfs fica com arquivos
+    // parcialmente extraídos e o debootstrap re-extrai POR CIMA, abortando com
+    // "Tried to extract package, but file already exists". Por isso SEMPRE
+    // apagamos a pasta de build do zero antes de começar.
+    try { fs.rmSync(buildDir, { recursive: true, force: true }); } catch {}
     for (const d of ['', 'assets', 'etc']) fs.mkdirSync(path.join(buildDir, d), { recursive: true });
     fs.mkdirSync(path.join(buildDir, 'rootfs'), { recursive: true });
     fs.mkdirSync(path.join(buildDir, 'rootfs', 'usr', 'share', 'backgrounds', name.toLowerCase()), { recursive: true });

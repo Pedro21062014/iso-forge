@@ -63,6 +63,9 @@ export async function bootstrapBase({ base, arch, targetRoot, includePkgs = [], 
   if (!tool) throw new Error(`Sem bootstrap automático para a base "${base}". Instale debootstrap/pacstrap/dnf.`);
 
   fs.mkdirSync(targetRoot, { recursive: true });
+  // Bootstrap exige um destino VAZIO (debootstrap, pacstrap e dnf abortam se
+  // sobrar arquivos de uma tentativa anterior — "file already exists").
+  cleanDir(targetRoot, logger);
 
   if (tool === 'debootstrap') {
     return bootstrapDebian({ base, arch, targetRoot, includePkgs, logger, pbar, sys });
@@ -74,6 +77,19 @@ export async function bootstrapBase({ base, arch, targetRoot, includePkgs = [], 
     return bootstrapDnf({ base, arch, targetRoot, includePkgs, logger, pbar, sys });
   }
   throw new Error('Nenhum método de bootstrap suportado.');
+}
+
+/** Esvazia um diretório (mantém a pasta em si). Evita o conflito de extração
+ *  "Tried to extract package, but file already exists" quando uma tentativa
+ *  anterior deixou lixo (debootstrap/pacstrap/dnf exigem destino limpo). */
+function cleanDir(dir, logger) {
+  try {
+    const leftovers = fs.readdirSync(dir);
+    if (leftovers.length) {
+      logger?.log(`Limpando ${leftovers.length} item(ns) residual(is) de uma tentativa anterior em ${dir}...`, 'info');
+      for (const it of leftovers) fs.rmSync(path.join(dir, it), { recursive: true, force: true });
+    }
+  } catch {}
 }
 
 /** Executa um comando externo transmitindo a saída AO VIVO para o terminal E
