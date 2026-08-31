@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { ProgressBar } from '../ui/progress.js';
+import { makePngGradient, makePngPlaceholder, formatMb } from './png.js';
 import { colors, bold, dim } from '../ui/ansi.js';
 import { confirmItem } from '../ui/prompts.js';
 import { detectPackageManager, hasSudo } from '../system.js';
@@ -9,9 +10,15 @@ import {
   BASE_DISTROS, EDITIONS, DESKTOPS, GLOBAL_THEMES, WALLPAPERS,
   LOCKSCREEN_STYLES, BOOT_THEMES, CUSTOM_APPS, KERNELS,
   LOCALES, TIMEZONES, COMPRESSION,
+  DESKTOP_PKGS, APP_PKGS,
 } from '../presets.js';
+import { bootstrapBase, detectBootstrap, installPackages, configureRootfs, makeBootableISO, BOOTSTRAP_TOOL } from './bootstrap.js';
 
 const pkg = (arr, v) => arr.find((x) => x.value === v)?.label || v;
+
+function hasTool(t) {
+  try { execSync(`command -v ${t} 2>/dev/null`, { stdio: 'ignore', timeout: 5000 }); return true; } catch { return false; }
+}
 
 /** Retorna o nome da primeira ferramenta de ISO disponível (ou null). */
 function pickTool(tools) {
@@ -21,52 +28,27 @@ function pickTool(tools) {
   return null;
 }
 
-/**
- * Pergunta ao usuário se quer instalar o xorriso e, se sim, instala via gerenciador
- * de pacotes (com sudo). Retorna o nome da ferramenta agora disponível (ou null).
- */
 async function askInstallIsoTool(logger, packageManager, hasSudoFlag) {
-  if (!packageManager) {
-    logger?.warn('Nenhum gerenciador de pacotes reconhecido — instale o xorriso manualmente.');
-    return null;
-  }
-  if (!hasSudoFlag) {
-    logger?.warn('sudo não encontrado — instale o xorriso manualmente.');
-    return null;
-  }
-
-  logger?.log(`${colors.orange(bold('Falta uma ferramenta de ISO (xorriso/mkisofs).'))} ` +
-    `Encontramos o seu gerenciador de pacotes (${packageManager.label}).`, 'warn');
+  if (!packageManager) { logger?.warn('Nenhum gerenciador de pacotes reconhecido — instale o xorriso manualmente.'); return null; }
+  if (!hasSudoFlag) { logger?.warn('sudo não encontrado — instale o xorriso manualmente.'); return null; }
+  logger?.log(`${colors.orange(bold('Falta uma ferramenta de ISO (xorriso/mkisofs).'))} Encontramos o seu gerenciador de pacotes (${packageManager.label}).`, 'warn');
   logger?.blank();
-
-  // esconde o rodapé enquanto pergunta, para o prompt não se sobrepor à barra
   logger?.clearFooter();
   const wantInstall = await confirmItem({
     title: `Quer que eu instale o "${packageManager.pkgName}" automaticamente agora? (pode pedir a senha do sudo)`,
   });
-
-  if (!wantInstall) {
-    logger?.log('Ok — seguiremos montando só o projeto de build (sem empacotar a ISO).', 'info');
-    return null;
-  }
-
+  if (!wantInstall) { logger?.log('Ok — seguiremos montando o projeto (sem ferramenta).', 'info'); return null; }
   const installCmd = `${packageManager.cmd} ${packageManager.pkgName}`;
   logger?.log(`Executando: ${installCmd}`, 'run');
-  // limpa o rodapé para a saída do sudo não se misturar com a barra
   logger?.clearFooter();
   logger?.blank();
   try {
     execSync(installCmd, { stdio: 'inherit', timeout: 1200000 });
     logger?.log(`${colors.green('✔ Instalação concluída.')}`, 'ok');
-    // re-detecta a ferramenta
     const { detectBuildTools } = await import('../system.js');
-    const now = detectBuildTools();
-    const t = pickTool(now);
-    if (t) logger?.log(`Ferramenta disponível agora: ${bold(t)}`, 'ok');
-    return t;
+    return pickTool(detectBuildTools());
   } catch (e) {
     logger?.err(`Não foi possível instalar o ${packageManager.pkgName}: ${e?.message || e}`);
-    logger?.log('Você pode instalar manualmente e rodar o iso-forge novamente, ou seguir só com o projeto de build.', 'info');
     return null;
   }
 }
@@ -78,371 +60,286 @@ export async function buildISO(config, { logger, sys, tools }) {
     locale, tz, persistence, autoLogin, extraTools, outputDir, fileName,
   } = config;
 
-  // Detecta o gerenciador de pacotes e o sudo (para poder instalar o xorriso)
   const packageManager = detectPackageManager();
   const sudoAvailable = hasSudo();
+  const boot = detectBootstrap();
 
-  // pesos de cada etapa (o total determina a distribuição da barra)
+  // pesos
   const steps = {
-    prepare: 5,
-    tools: 3,
-    rootfs: 12,
-    packages: 18,
-    theme: 12,
-    wallpapers: 9,
-    lock: 8,
-    boot: 10,
-    apps: 14,
-    config: 9,
-    squashfs: 16,
-    iso: 16,
-    finalize: 6,
+    prepare: 3, tools: 2, bootstrap: 26, pkgs: 20, desktop: 10, theme: 4,
+    wallpapers: 6, lock: 3, boot: 6, apps: 8, config: 3, squashfs: 6, iso: 3,
   };
   const total = Object.values(steps).reduce((a, b) => a + b, 0);
 
   const outRoot = path.resolve(outputDir);
   const workDir = path.join(outRoot, '.iso-forge-work', name.replace(/\s+/g, '-').toLowerCase());
   const buildDir = path.join(workDir, 'build');
+  const rootfs = path.join(buildDir, 'rootfs');
 
   const warn = sys.speedFactor > 1 ? sys.slowWarning : '';
-  const pbar = new ProgressBar({
-    total,
-    speedFactor: sys.speedFactor,
-    warn,
-    logger,
-  });
-
+  const pbar = new ProgressBar({ total, speedFactor: sys.speedFactor, warn, logger });
   const say = (msg) => logger?.log(msg, 'build');
 
   let cursor = 0;
-  const advance = async (name, ms = 100) => {
-    cursor += steps[name] || 1;
-    pbar.update(cursor, total);
-    await pbar.idle(ms); // espera escalada pela velocidade da máquina
-  };
+  const advance = async (ln, ms = 100) => { cursor += steps[ln] || 1; pbar.update(cursor, total); await pbar.idle(ms); };
+
+  // Capacidade de fazer build REAL (bootstrap) ?
+  const canBootstrap = boot.debootstrap && sudoAvailable;
+  const tool = BOOTSTRAP_TOOL[base];
 
   try {
-    // ---------- 0. preparar ambiente ----------
     say(bold(colors.purple('\n══════════ INICIANDO BUILD ══════════')));
-    say(`Ferramentas detectadas: ${Object.entries(tools).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhuma ainda'}`, 'env');
 
-    pbar.update(0, total);
-
-    // ---- preparar diretório ----
-    say(`Preparando diretório de trabalho: ${buildDir}`, 'build');
-    fs.mkdirSync(buildDir, { recursive: true });
+    // ---------- preparar dirs ----------
+    say(`Preparando diretórios em: ${buildDir}`, 'build');
+    for (const d of ['', 'assets', 'etc']) fs.mkdirSync(path.join(buildDir, d), { recursive: true });
     fs.mkdirSync(path.join(buildDir, 'rootfs'), { recursive: true });
-    fs.mkdirSync(path.join(buildDir, 'rootfs', 'etc'), { recursive: true });
-    fs.mkdirSync(path.join(buildDir, 'rootfs', 'usr', 'share'), { recursive: true });
-    fs.mkdirSync(path.join(buildDir, 'boot'), { recursive: true });
-    fs.mkdirSync(path.join(buildDir, 'assets'), { recursive: true });
-    fs.mkdirSync(path.join(buildDir, 'etc'), { recursive: true });
-    fs.mkdirSync(path.join(buildDir, 'rootfs', 'usr', 'share', 'backgrounds'), { recursive: true });
-    fs.mkdirSync(path.join(buildDir, 'rootfs', 'usr', 'share', 'themes'), { recursive: true });
+    fs.mkdirSync(path.join(buildDir, 'rootfs', 'usr', 'share', 'backgrounds', name.toLowerCase()), { recursive: true });
     await advance('prepare', 120);
 
-    // ---- verificar ferramentas de ISO e, se faltar, pedir permissão para instalar ----
-    let isoTool = pickTool(tools);
-    if (isoTool) {
-      say(`Ferramenta de ISO encontrada: ${bold(isoTool)} — usaremos para gerar a imagem.`, 'ok');
+    // ---------- decidir o modo (real vs esqueleto) ----------
+    const mode = (!canBootstrap || !tool) ? 'skeleton' : 'real';
+    if (mode === 'skeleton') {
+      say(colors.orange(bold('⚠ SEM BOOTSTRAP DISPONÍVEL — modo "projeto" (ISO compacta, não bootável).')), 'warn');
+      say('Para gerar uma ISO REAL com o sistema completo, instale o debootstrap (Debian/Ubuntu/Mint) e tenha sudo:', 'warn');
+      say('   sudo apt install debootstrap   # Debian/Ubuntu', 'info');
+      say('O resultado ainda será criado, mas é o ESPELHO do projeto, não o sistema de verdade.', 'warn');
     } else {
-      say(`${colors.orange(bold('Nenhuma ferramenta de ISO (xorriso/mkisofs/genisoimage) encontrada.'))}`, 'warn');
-      // Pedir permissão para instalar o xorriso automaticamente
-      const installed = await askInstallIsoTool(logger, packageManager, sudoAvailable);
-      if (installed) {
-        isoTool = installed;
-        // atualiza o snapshot de ferramentas para refletir a instalação
-        tools.xorriso = isoTool === 'xorriso' || tools.xorriso;
-        tools.mkisofs = isoTool === 'mkisofs' || tools.mkisofs;
-        tools.genisoimage = isoTool === 'genisoimage' || tools.genisoimage;
-        say(`${bold('✔ xorriso instalado!')} Vamos gerar uma ISO real.`, 'ok');
-      }
+      say(colors.green(bold(`✔ Modo REAL ativo: bootstrap via ${tool} + squashfs + ISO bootável.`)), 'ok');
+      say(`A base "${pkg(BASE_DISTROS, base)}" será baixada e instalada de verdade. Isso baixa vários GB e demora.`, 'info');
     }
-    if (tools.debootstrap) say('debootstrap disponível: podemos montar um sistema base real.', 'ok');
-    else say('debootstrap não encontrado: usaremos a estrutura base padrão.', 'info');
     await advance('tools', 120);
 
-    // ---- asset: logo de boot ----
-    say('Processando logo de boot...', 'build');
-    await resolveAsset(bootLogo, path.join(buildDir, 'assets', 'boot-logo.png'), logger);
-    await advance('theme', 60);
+    // ---------- bootstrap do sistema base ----------
+    if (mode === 'real') {
+      say(`Bootstrapando o sistema base "${pkg(BASE_DISTROS, base)}" (${arch})...`, 'build');
+      const baseMeta = DEFAULT_PKGS_BY_EDITION(edition, wallpapers, apps, desktop, theme, lockStyle, extraTools, base);
+      // bootstrap com pacotes base + kernel + ferramentas
+      const bootInclude = baseMeta.bootstrapIncludes;
+      await bootstrapBase({
+        base, arch, targetRoot: rootfs, includePkgs: bootInclude, logger, pbar, sys,
+      });
+      await advance('bootstrap', 160);
+      say(`${colors.green('✔')} Sistema base pronto em ${rootfs}.`, 'ok');
+    } else {
+      // esqueleto: prepara estrutura mínima para a ISO compacta
+      say('Criando projeto base (esqueleto)...', 'build');
+      fs.writeFileSync(path.join(rootfs, 'etc', 'os-release'),
+        `NAME="${name}"\nID=${name.replace(/\s+/g, '_').toLowerCase()}\nID_LIKE=${base}\nPRETTY_NAME="${name}" (${edition})\n`);
+      fs.writeFileSync(path.join(rootfs, 'etc', 'hostname'), `${name.toLowerCase()}\n`);
+      fs.writeFileSync(path.join(buildDir, 'pkgs-base.txt'), 'base inicial\n');
+      await advance('bootstrap', 200);
+    }
 
-    // ---- asset: logo do sistema ----
-    say('Processando logo do sistema...', 'build');
-    await resolveAsset(sysLogo, path.join(buildDir, 'assets', 'system-logo.svg'), logger);
-    await advance('theme', 60);
-
-    // ---- árvore raiz ----
-    say('Montando árvore raiz (rootfs)...', 'build');
-    fs.writeFileSync(path.join(buildDir, 'rootfs', 'etc', 'os-release'),
-      `NAME="${name}"\nID=${name.replace(/\s+/g, '_').toLowerCase()}\nVERSION_ID="1.0"\nID_LIKE=${base}\nPRETTY_NAME="${name} (${edition})"\n`);
-    fs.writeFileSync(path.join(buildDir, 'rootfs', 'etc', 'hostname'), `${name.toLowerCase()}`);
-    fs.writeFileSync(path.join(buildDir, 'rootfs', 'etc', 'machine-id'), 'iso-forge-generated\n');
-    await advance('rootfs', 200);
-
-    // ---- pacotes base + dependências da edição ----
-    say(`Instalando pacotes da base ${pkg(BASE_DISTROS, base)} (edição ${pkg(EDITIONS, edition)})...`, 'build');
-    const editionWeight = EDITIONS.find((e) => e.value === edition)?.weight || 2;
-    const basePackages = edPackages(editionWeight);
-    fs.writeFileSync(path.join(buildDir, 'pkgs-base.txt'), basePackages.join('\n'));
-    await advance('packages', 260);
-
-    // ---- tema do desktop ----
+    // ---------- aplicar desktop + apps no rootfs ----------
     const desktopLabel = pkg(DESKTOPS, desktop);
-    say(`Aplicando ambiente de desktop: ${desktopLabel}`, 'build');
-    fs.writeFileSync(path.join(buildDir, 'rootfs', 'etc', 'desktop-env'), desktop + '\n');
-    const themeConfDir = path.join(buildDir, 'rootfs', 'usr', 'share', 'themes', theme);
-    fs.mkdirSync(themeConfDir, { recursive: true });
-    fs.writeFileSync(path.join(themeConfDir, 'theme.conf'),
-      `# Tema global: ${pkg(GLOBAL_THEMES, theme)}\nfont=DejaVu Sans 10\n`);
-    await advance('theme', 240); // tema core
+    const wallDir = path.join(rootfs, 'usr', 'share', 'backgrounds', name.toLowerCase());
 
-    // ---- wallpapers ----
-    say('Instalando wallpapers...', 'build');
-    const wallDir = path.join(buildDir, 'rootfs', 'usr', 'share', 'backgrounds', name.toLowerCase());
+    if (mode === 'real') {
+      // instala o desktop (meta-pacote da base)
+      const desktopMeta = DESKTOP_PKGS[base]?.[desktop] || [];
+      const appPkgs = apps.flatMap((a) => APP_PKGS[base]?.[a] || []);
+      const extraReal = extraTools.flatMap((t) => EXTRA_TOOLS_PKGS[base]?.[t] || []);
+      say(`Instalando desktop ${desktopLabel} (meta-pacote)...`, 'build');
+      await installPackages({ base, rootfs, pkgs: desktopMeta, logger });
+      await advance('desktop', 160);
+      say('Pré-instalando aplicativos personalizados...', 'build');
+      await installPackages({ base, rootfs, pkgs: appPkgs, logger });
+      await advance('apps', 160);
+      say('Instalando extras (drivers, codecs, fontes)...', 'build');
+      const extraList = Object.keys(extraReal).length ? Object.values(extraReal).flat() : [];
+      await installPackages({ base, rootfs, pkgs: extraReal, logger });
+      await advance('pkgs', 160);
+      // O apt-get dentro do chroot recria arquivos como root quando instala pacotes.
+      // Então só agora transferimos a posse ao usuário, para o Node poder escrever
+      // os arquivos de configuração (hostname, hosts, os-release, wallpapers, grub...).
+      sudoChown(rootfs);
+      // configura o sistema
+      await configureRootfs({ base, rootfs, name, locale, tz, logger });
+      await advance('config', 120);
+    } else {
+      say('Configurando sistema (esqueleto)...', 'build');
+      fs.writeFileSync(path.join(rootfs, 'etc', 'desktop-env'), `${desktop}\n`);
+      fs.writeFileSync(path.join(rootfs, 'etc', 'system.conf'),
+        `kernel=${kernel}\ncompression=${compression}\nlocale=${locale}\ntimezone=${tz}\npersistence=${persistence}\nautologin=${autoLogin}\narch=${arch}\ndesktop=${desktop}\n`);
+      await advance('desktop', 80);
+    }
+
+    // ---------- tema ----------
+    say(`Aplicando tema global: ${pkg(GLOBAL_THEMES, theme)}`, 'build');
+    const themeDir = path.join(rootfs, 'usr', 'share', 'themes', theme);
+    fs.mkdirSync(themeDir, { recursive: true });
+    fs.writeFileSync(path.join(themeDir, 'theme.conf'), `# Tema: ${pkg(GLOBAL_THEMES, theme)}\nfont=DejaVu Sans 10\n`);
+    await advance('theme', 120);
+
+    // ---------- wallpapers (gerados procedurais + personalizados) ----------
+    say(`Instalando ${wallpapers.length + customWalls.length || 1} wallpaper(s)...`, 'build');
     fs.mkdirSync(wallDir, { recursive: true });
     const allWalls = [...wallpapers, ...customWalls];
-    say(`${allWalls.length || 1} wallpaper(s) aplicados.`, 'ok');
     if (allWalls.length === 0) {
-      fs.writeFileSync(path.join(wallDir, 'default.png'), 'PLACEHOLDER_WALLPAPER\n');
+      fs.writeFileSync(path.join(wallDir, 'default.png'), makePngPlaceholder(name));
     }
     let wd = 0;
     for (const w of allWalls) {
+      const wp = WALLPAPERS.find((x) => x.value === w);
       const safe = String(w).replace(/[^a-zA-Z0-9._-]/g, '_');
-      fs.writeFileSync(path.join(wallDir, `${safe}.wall`), `source=${w}\n`);
+      if (wp) {
+        // gera PNG procedural (gradiente real)
+        fs.writeFileSync(path.join(wallDir, `${safe}.png`), makePngGradient(wp.colorA, wp.colorB));
+      } else {
+        // caminho/URL personalizado
+        await resolveAsset(w, path.join(wallDir, `${safe}.png`), logger);
+      }
       wd++;
       cursor += Math.ceil(steps.wallpapers / Math.max(1, allWalls.length));
       pbar.update(cursor, total);
-      await pbar.idle(40);
+      await pbar.idle(30);
     }
-    if (wd === 0) cursor += steps.wallpapers;
     pbar.update(cursor, total);
-    await pbar.idle(80);
+    await advance('wallpapers', 60);
 
-    // ---- tela de bloqueio ----
+    // ---------- tela de bloqueio ----------
     say(`Aplicando tela de bloqueio: ${pkg(LOCKSCREEN_STYLES, lockStyle)}`, 'build');
-    fs.writeFileSync(path.join(buildDir, 'rootfs', 'etc', 'lockscreen.conf'),
-      `style=${lockStyle}\nblur=${lockStyle === 'blur' ? 'true' : 'false'}\nclock-clock=center\n`);
-    await advance('lock', 160);
+    fs.writeFileSync(path.join(rootfs, 'etc', 'lockscreen.conf'), `style=${lockStyle}\nblur=${lockStyle === 'blur' ? '1' : '0'}\n`);
+    await advance('lock', 80);
 
-    // ---- boot / splash ----
-    say(`Aplicando tema de boot: ${pkg(BOOT_THEMES, bootTheme)} · Plymouth ${splash}`, 'build');
-    fs.writeFileSync(path.join(buildDir, 'rootfs', 'etc', 'boot-theme'), `${bootTheme}\nplymouth=${splash}\n`);
-    writeGrubConfig(path.join(buildDir, 'boot', 'grub', 'grub.cfg'), name);
-    writeIsolinuxConfig(path.join(buildDir, 'boot', 'isolinux', 'isolinux.cfg'), name);
-    await advance('boot', 200);
-
-    // ---- apps personalizados ----
-    say(`Pré-instalando ${apps.length} aplicativos...`, 'build');
-    fs.writeFileSync(path.join(buildDir, 'pkgs-apps.txt'), apps.join('\n'));
-    let a = 0;
-    for (const app of apps) {
-      const meta = CUSTOM_APPS.find((x) => x.value === app);
-      say(`   → instalar ${meta?.label || app}`, 'build');
-      a++;
-      cursor += Math.ceil(steps.apps / Math.max(1, apps.length));
-      pbar.update(cursor, total);
-      await pbar.idle(120);
-    }
-    if (a === 0) cursor += steps.apps;
-    pbar.update(cursor, total);
-    await pbar.idle(80);
-
-    // ---- configs avançadas ----
-    say('Aplicando configurações avançadas...', 'build');
-    fs.writeFileSync(path.join(buildDir, 'rootfs', 'etc', 'system.conf'),
-      `kernel=${kernel}\ncompression=${compression}\nlocale=${locale}\ntimezone=${tz}\npersistence=${persistence}\nautologin=${autoLogin}\narch=${arch}\n`);
-    fs.writeFileSync(path.join(buildDir, 'rootfs', 'etc', 'extra-tools'), extraTools.join('\n'));
-    say(`Kernel: ${pkg(KERNELS, kernel)} · ${pkg(COMPRESSION, compression)} · ${locale} · ${tz}`, 'ok');
-    await advance('config', 180);
-
-    // ---- squashfs ----
-    say('Criando sistema de arquivos squashfs...', 'build');
-    say(`Método: ${pkg(COMPRESSION, compression)}${tools.squashfs ? ' (mksquashfs disponível)' : ' (modo simulado)'}`, 'build');
-    // empacota o rootfs num squashfs se disponível, senão cria snapshot
-    const squashMode = tools.squashfs;
-    const manifestDir = path.join(buildDir, 'rootfs', 'usr', 'share', 'iso-forge');
+    // ---------- boot / splash ----------
+    say(`Aplicando boot: ${pkg(BOOT_THEMES, bootTheme)} · Plymouth ${splash}`, 'build');
+    fs.writeFileSync(path.join(rootfs, 'etc', 'boot-theme'), `${bootTheme}\nplymouth=${splash}\n`);
+    writeGrubConfig(path.join(rootfs, 'boot', 'grub', 'grub.cfg'), name, rootfs);
+    writeIsolinuxConfig(path.join(rootfs, 'boot', 'isolinux', 'isolinux.cfg'), name);
+    const manifestDir = path.join(rootfs, 'usr', 'share', 'iso-forge');
     fs.mkdirSync(manifestDir, { recursive: true });
-    fs.writeFileSync(path.join(manifestDir, 'manifest.json'),
-      JSON.stringify(config, null, 2));
-    await advance('squashfs', 320);
+    fs.writeFileSync(path.join(manifestDir, 'manifest.json'), JSON.stringify(config, null, 2));
+    await advance('boot', 120);
 
-    // ---- gerar ISO ----
+    // ---------- squashfs (compacta o sistema) ----------
+    say(`Compactando o sistema (squashfs, método ${pkg(COMPRESSION, compression)})...`, 'build');
+    const squashPath = path.join(buildDir, 'filesystem.squashfs');
+    if (mode === 'real') {
+      const compFlag = { gzip: '-comp gzip', xz: '-comp xz', zstd: '-comp zstd', lzo: '-comp lzo' }[compression] || '';
+      try {
+        execSync(`sudo mksquashfs ${rootfs} ${squashPath} ${compFlag} -no-progress`, { stdio: 'inherit', timeout: 3600000 });
+        say(`Sistema compactado: ${formatMb(fs.statSync(squashPath).size)}.`, 'ok');
+      } catch (e) { say('Falha no mksquashfs: ' + (e?.message || e), 'err'); }
+    } else {
+      fs.writeFileSync(squashPath, makePngPlaceholder(name));
+      say('(esqueleto: squashfs placeholder)', 'info');
+    }
+    await advance('squashfs', 160);
+
+    // ---------- gerar ISO ----------
     say('Gerando a imagem ISO...', 'build');
     const isoPath = path.join(outRoot, fileName);
-    const bootDir = buildDir;
     let isoBuilt = false;
-    if (isoTool === 'xorriso') isoBuilt = runIso('xorriso', isoPath, bootDir, name);
-    else if (isoTool === 'mkisofs') isoBuilt = runIso('mkisofs', isoPath, bootDir, name);
-    else if (isoTool === 'genisoimage') isoBuilt = runIso('genisoimage', isoPath, bootDir, name);
-
-    await advance('iso', 300);
+    if (mode === 'real') {
+      isoBuilt = await makeBootableISO({ rootfs, isoPath, name, logger });
+    } else {
+      // esqueleto: empacota apenas os arquivos de config como ISO de dados
+      isoBuilt = makeMinimalIso(isoPath, buildDir, name);
+    }
+    await advance('iso', 160);
 
     if (isoBuilt) {
-      say(`ISO criada: ${bold(colors.green(isoPath))}`, 'ok');
+      const sz = fs.existsSync(isoPath) ? formatMb(fs.statSync(isoPath).size) : '0';
+      say(`ISO criada: ${bold(colors.green(isoPath))} (${sz})`, 'ok');
+      if (mode === 'real') say(colors.green(bold('✔ ISO BOOTÁVEL com o sistema completo gerada!')));
     } else {
-      // fallback: monta o projeto pronto para ISO e tenta um ISO leve via dados
-      say('Não foi possível empacotar via ferramenta externa. Gerando ISO base local (dados + boot padrão).', 'warn');
-      say('Instale xorriso (ou genisoimage) e rode novamente para obter ISO totalmente bootável com squashfs.', 'warn');
-      const fallbackIso = await buildFallbackIso(isoPath, buildDir, name);
-      if (fallbackIso) {
-        say(`ISO gerada (modalidade base): ${bold(colors.green(fallbackIso))}`, 'ok');
-        isoBuilt = true;
-      }
+      say('Não foi possível gerar a ISO. Verifique xorriso/grub-mkrescue.', 'err');
     }
 
-    // ---- finalize ----
+    // ---------- finalize ----------
     say('Finalizando e assinando artifacts...', 'build');
     fs.writeFileSync(path.join(buildDir, 'iso-forge.config.json'), JSON.stringify(config, null, 2));
-    fs.writeFileSync(path.join(outRoot, fileName + '.info.txt'), summaryText(config, sys));
-    if (isoBuilt) {
-      try {
-        execSync(`sha256sum '${isoPath}'`, { stdio: 'ignore', timeout: 200000 });
-        say('Checksum SHA-256 calculado com sucesso.', 'ok');
-      } catch {}
-    }
-    await advance('finalize', 160);
+    fs.writeFileSync(path.join(outRoot, fileName + '.info.txt'), summaryText(config, sys, mode, fs.existsSync(isoPath) ? formatMb(fs.statSync(isoPath).size) : '0'));
+    try { execSync(`sha256sum '${isoPath}'`, { stdio: 'ignore', timeout: 200000 }); } catch {}
+    await advance('config', 80);
 
     pbar.update(total, total);
     pbar.finish();
     const finalIso = path.join(outRoot, fileName);
     const realBuilt = fs.existsSync(finalIso);
-
     if (realBuilt) {
       say(bold(colors.green('══════════ BUILD CONCLUÍDO COM SUCESSO ══════════')));
       say('Sua ISO está em: ' + bold(colors.cyan(finalIso)));
-      say('Projeto de build pronto em: ' + bold(colors.gray(buildDir)));
-      return { isoPath: finalIso, built: true };
+      if (mode === 'skeleton') say('Nota: esta é uma ISO ESPELHO (projeto). Para o sistema completo, instale debootstrap.', 'warn');
+      return { isoPath: finalIso, built: true, mode };
     } else {
       say(bold(colors.orange('═════════ PROJETO MONTADO · ISO PENDENTE ═════════')));
-      say('O projeto de build está completo em: ' + bold(colors.cyan(buildDir)));
-      if (packageManager && sudoAvailable) {
-        say('Rode o iso-forge novamente e aceite a instalação do xorriso para gerar a ISO real.');
-      } else {
-        say('Para gerar a imagem final, instale uma ferramenta ISO e rode:');
-        say('   sudo apt install xorriso   (Debian/Ubuntu)');
-        say('   sudo dnf install xorriso   (Fedora)');
-        say('   sudo pacman -S libisoburn  (Arch)');
-        say('Depois execute novamente o iso-forge (ou use a pasta do projeto).');
-      }
-      return { isoPath: null, built: false, projectDir: buildDir };
+      return { isoPath: null, built: false, mode, projectDir: buildDir };
     }
-
   } catch (err) {
     pbar.clear();
     say(colors.red('✖ Erro durante o build: ' + (err?.message || err)), 'err');
     return { isoPath: null, built: false };
-
   } finally {
     if (logger) logger.clearFooter();
   }
 }
 
-// ---- helpers ----
+// ---------------- helpers ----------------
 
-function edPackages(weight) {
-  const base = ['systemd', 'linux-firmware', 'locales', 'tzdata', 'bash', 'coreutils', 'grub-efi', 'xorg-server', 'mesa'];
-  const extra = {
-    1: [], // lite: apenas o essencial
-    2: ['dolphin', 'konsole', 'kate', 'file-roller'], // leve
-    3: ['build-essential', 'gcc', 'git', 'python3', 'gparted', 'office-basic'], // core
-  }[weight] || [];
-  return [...base, ...extra];
+/** Pacotes base + extras por edição.
+ *  ATENÇÃO: o `--include` do debootstrap só encontra pacotes do repositório MÍNIMO
+ *  da suíte. Pacotes de desktop/xorg/mesa precisam ser instalados DEPOIS via chroot
+ *  (installPackages), que enxerga o repositório completo. Por isso aqui colocamos
+ *  apenas o essencial (kernel, initramfs, grub, squashfs, locales). */
+function DEFAULT_PKGS_BY_EDITION(edition, wallpapers, apps, desktop, theme, lockStyle, extraTools, base) {
+  const weight = EDITIONS.find((e) => e.value === edition)?.weight || 2;
+  const basePkgs = ['locales', 'tzdata', 'systemd', 'initramfs-tools',
+    'grub-pc-bin', 'grub-efi-amd64-bin', 'linux-image-amd64', 'squashfs-tools', 'rsync', 'apt-utils'];
+  const editionExtra = weight >= 3 ? ['build-essential', 'gcc', 'git', 'python3'] : [];
+  return { bootstrapIncludes: [...basePkgs, ...editionExtra] };
 }
 
-async function resolveAsset(input, dest, logger) {
-  if (!input || !String(input).trim()) {
-    fs.writeFileSync(dest, 'ISO-FORGE-PLACEHOLDER\n');
-    logger?.log('   (usando logo padrão — nenhum caminho/URL informado)', 'build');
-    return;
-  }
-  // tentar baixar se for URL
-  if (/^https?:\/\//i.test(input)) {
-    try {
-      const res = await fetch(input);
-      if (res.ok) {
-        const buf = Buffer.from(await res.arrayBuffer());
-        fs.writeFileSync(dest, buf);
-        logger?.log(`   logo baixado de ${input}`, 'ok');
-        return;
-      }
-    } catch {}
-    logger?.log('   não foi possível baixar a URL, usando placeholder', 'warn');
-    fs.writeFileSync(dest, 'ISO-FORGE-PLACEHOLDER\n');
-    return;
-  }
-  // caminho local
-  if (fs.existsSync(input)) {
-    fs.copyFileSync(input, dest);
-    logger?.log(`   logo copiado de ${input}`, 'ok');
-  } else {
-    logger?.log('   caminho não encontrado, usando placeholder', 'warn');
-    fs.writeFileSync(dest, 'ISO-FORGE-PLACEHOLDER\n');
-  }
-}
+const EXTRA_TOOLS_PKGS = {
+  debian: { drivers: ['nvidia-legacy-390xx-kernel-source'], codecs: ['gstreamer1.0-plugins-good', 'gstreamer1.0-plugins-bad', 'gstreamer1.0-plugins-ugly'], fonts: ['fonts-dejavu', 'fonts-noto'], dev: ['build-essential', 'gcc'], misc: ['htop', 'tree', 'curl', 'wget'] },
+  ubuntu: { drivers: ['nvidia-driver-535', 'mesa-vulkan-drivers'], codecs: ['gstreamer1.0-plugins-good', 'gstreamer1.0-plugins-bad', 'gstreamer1.0-plugins-ugly'], fonts: ['fonts-dejavu', 'fonts-noto'], dev: ['build-essential', 'gcc'], misc: ['htop', 'tree', 'curl', 'wget'] },
+  arch: { drivers: ['nvidia', 'mesa-vulkan-drivers'], codecs: ['gstreamer', 'ffmpeg'], fonts: ['ttf-dejavu', 'noto-fonts'], dev: ['base-devel'], misc: ['htop', 'tree', 'curl', 'wget'] },
+};
 
-function writeGrubConfig(p, name) {
+function writeGrubConfig(p, name, rootfs) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
+  const useSplash = 'quiet splash';
   fs.writeFileSync(p, `
 set timeout=5
 set default=0
 menuentry "${name} (Live)" {
-  echo "Iniciando ${name}..."
-  boot
+  linux /boot/vmlinuz root=live rw ${useSplash}
+  initrd /boot/initrd.img
 }
 `);
 }
 
 function writeIsolinuxConfig(p, name) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, `
-DEFAULT linux
-LABEL linux
-    KERNEL /boot/vmlinuz
-    APPEND initrd=/boot/initrd.img quiet splash
-`);
+  fs.writeFileSync(p, `DEFAULT linux\nLABEL linux\n  KERNEL /boot/vmlinuz\n  APPEND initrd=/boot/initrd.img quiet splash\n`);
 }
 
-function runIso(tool, isoPath, buildDir, name) {
+async function resolveAsset(input, dest, logger) {
+  if (!input || !String(input).trim()) { fs.writeFileSync(dest, makePngPlaceholder('logo')); return; }
+  if (/^https?:\/\//i.test(input)) {
+    try { const res = await fetch(input); if (res.ok) { fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer())); return; } } catch {}
+    logger?.log('   não foi possível baixar ' + input, 'warn');
+    fs.writeFileSync(dest, makePngPlaceholder('logo'));
+    return;
+  }
+  if (fs.existsSync(input)) { fs.copyFileSync(input, dest); return; }
+  fs.writeFileSync(dest, makePngPlaceholder('logo'));
+}
+
+function makeMinimalIso(isoPath, buildDir, name) {
   try {
-    const args = [
-      '-o', isoPath,
-      '-allow-lowercase',
-      '-volid', name.replace(/\s+/g, '-').slice(0, 30).toUpperCase(),
-    ];
-    // xorriso precisa da emulação mkisofs para aceitar essas opções
-    const cmd = tool === 'xorriso' ? `xorriso -as mkisofs` : tool;
-    execSync(`${cmd} ${args.map((a) => `'${String(a).replace(/'/g, "'\\''")}'`).join(' ')} '${buildDir}'`, {
-      stdio: 'inherit',
-      timeout: 1200000,
-    });
+    const d = path.join(buildDir, 'iso-root'); fs.mkdirSync(d, { recursive: true });
+    fs.copyFileSync(path.join(buildDir, 'rootfs', 'etc', 'os-release'), path.join(d, 'os-release'));
+    fs.copyFileSync(path.join(buildDir, 'iso-forge.config.json'), path.join(d, 'config.json'));
+    const tool = hasTool('xorriso') ? 'xorriso -as mkisofs' : hasTool('genisoimage') ? 'genisoimage' : 'mkisofs';
+    execSync(`${tool} -o ${isoPath} -V "${name}" ${d}`, { stdio: 'inherit', timeout: 120000 });
     return fs.existsSync(isoPath);
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-async function buildFallbackIso(isoPath, buildDir, name) {
-  // gera uma imagem ISO de dados válida usando xorriso/mkisofs se disponível,
-  // senão tenta montar com "genisoimage". Se nenhuma, retorna null.
-  const anyTool = [
-    ['xorriso', '-as', 'mkisofs'],
-    ['mkisofs'],
-    ['genisoimage'],
-  ].find(([t]) => {
-    try { execSync(`command -v ${t} 2>/dev/null`, { stdio: 'ignore' }); return true; } catch { return false; }
-  });
-  if (!anyTool) return null;
-  try {
-    const args = ['-o', isoPath, '-allow-lowercase', '-volid', name.replace(/\s+/g, '-').slice(0, 30).toUpperCase()];
-    execSync(`${anyTool.join(' ')} ${args.map((a) => `'${a}'`).join(' ')} '${buildDir}'`, { stdio: 'inherit', timeout: 1200000 });
-    return fs.existsSync(isoPath) ? isoPath : null;
-  } catch {
-    return null;
-  }
-}
-
-function summaryText(config, sys) {
+function summaryText(config, sys, mode, sz) {
   return [
     'ISO-FORGE Relatório de build',
     '============================',
@@ -452,16 +349,24 @@ function summaryText(config, sys) {
     `Arquitetura: ${config.arch}`,
     `Desktop: ${config.desktop}`,
     `Tema: ${config.theme}`,
-    `Bolde: ${config.bootTheme}`,
     `Kernel: ${config.kernel}`,
     `Compressão: ${config.compression}`,
     `Locale: ${config.locale}`,
     `Timezone: ${config.tz}`,
     `Persistência: ${config.persistence}`,
     `Apps: ${config.apps.join(', ')}`,
+    `Modo: ${mode}`,
+    `Tamanho da ISO: ${sz}`,
     '',
     `Gerado em máquina com ${sys.cpus} CPUs e ${sys.totalGb.toFixed(1)} GB de RAM.`,
-    '',
-    'https://npi.github.io',
   ].join('\n');
+}
+
+// ---------------- generators PNG procedurais (ver ./png.js) ----------------
+
+/** Transfere a posse dos arquivos do rootfs para o usuário atual (via sudo). */
+function sudoChown(rootfs) {
+  try {
+    execSync(`sudo chown -R $(id -u):$(id -g) '${rootfs}'`, { stdio: 'inherit', timeout: 600000 });
+  } catch { /* se falhar (ex.: sem sudo), seguimos e os writes falham com aviso claro */ }
 }

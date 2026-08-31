@@ -72,6 +72,20 @@ iso-forge --help     # ajuda
 iso-forge --version  # versão
 ```
 
+### 🖥️ O que a ISO realmente contém (build REAL)
+
+Diferente de ferramentas que só geram um "esqueleto", o **iso-forge faz um bootstrap real**:
+
+1. **Baixa e instala o sistema base** de verdade (`debootstrap` para Debian/Ubuntu/Mint, `pacstrap` para Arch, `dnf` para Fedora/openSUSE) — kernel, initramfs, GRUB, locais, tudo.
+2. **Instala o desktop escolhido** (meta-pacote real: `kubuntu-desktop`, `xfce4`, `cinnamon`...).
+3. **Instala cada app personalizado** que você marcou (Firefox, VLC, LibreOffice, git, etc.).
+4. **Aplica o tema, a tela de bloqueio, o boot e os wallpapers** (geramos imagens reais 1920×1080 em PNG — gradientes — e você pode adicionar os seus por caminho/URL).
+5. **Compacta** o sistema num **squashfs** e monta uma **ISO bootável** (GRUB + isolinux + EFI).
+
+**Resultado:** uma ISO real de **centenas de MB a ~2–4 GB** (dependendo da base e dos apps), que **boota em um PC/virtualizador**.
+
+> ⚠️ **Requisitos para o modo REAL:** ter `debootstrap` (ou `pacstrap`/`dnf`), `sudo`, `squashfs-tools`, `grub-mkrescue`/`xorriso` e **internet** (baixa a base toda). Se algo faltar, o iso-forge avisa claramente e cai no *modo esqueleto* (projeto, ISO compacta) — nunca te engana.
+
 ### Instalação automática do xorriso 🔐
 
 Se o **xorriso** (ou `mkisofs`/`genisoimage`) não estiver instalado, o `iso-forge` **detecta o gerenciador de pacotes e pede a sua permissão para instalar automaticamente**:

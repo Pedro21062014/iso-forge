@@ -50,14 +50,19 @@ export const GLOBAL_THEMES = [
 ];
 
 export const WALLPAPERS = [
-  { value: 'mountains', label: 'Montanhas (natural)', desc: 'Paisagem serena com gradiente.' },
-  { value: 'abstract-gradient', label: 'Gradiente abstrato', desc: 'Cores fluidas e modernas.' },
-  { value: 'minimal-lines', label: 'Linhas minimalistas', desc: 'Limpo e geométrico.' },
-  { value: 'space-nebula', label: 'Nebulosa espacial', desc: 'Profundidade cósmica.' },
-  { value: 'dark-waves', label: 'Ondas escuras', desc: 'Sutil e elegante.' },
-  { value: 'nature-forest', label: 'Floresta', desc: 'Verde e natureza.' },
-  { value: 'cyber-city', label: 'Cidade cyberpunk', desc: 'Neon e futurista.' },
-  { value: 'flat-icons', label: 'Ícones flat', desc: 'Geométrico e direto.' },
+  { value: 'mountains', label: 'Montanhas (natural)', desc: 'Paisagem serena com gradiente.', colorA: [98, 130, 190], colorB: [30, 40, 70] },
+  { value: 'abstract-gradient', label: 'Gradiente abstrato', desc: 'Cores fluidas e modernas.', colorA: [255, 100, 120], colorB: [80, 40, 160] },
+  { value: 'minimal-lines', label: 'Linhas minimalistas', desc: 'Limpo e geométrico.', colorA: [40, 45, 60], colorB: [10, 12, 22] },
+  { value: 'space-nebula', label: 'Nebulosa espacial', desc: 'Profundidade cósmica.', colorA: [120, 60, 180], colorB: [10, 10, 40] },
+  { value: 'dark-waves', label: 'Ondas escuras', desc: 'Sutil e elegante.', colorA: [30, 34, 45], colorB: [8, 10, 16] },
+  { value: 'nature-forest', label: 'Floresta', desc: 'Verde e natureza.', colorA: [90, 160, 90], colorB: [20, 60, 30] },
+  { value: 'cyber-city', label: 'Cidade cyberpunk', desc: 'Neon e futurista.', colorA: [0, 200, 220], colorB: [180, 0, 120] },
+  { value: 'flat-icons', label: 'Ícones flat', desc: 'Geométrico e direto.', colorA: [70, 140, 200], colorB: [30, 60, 120] },
+  { value: 'sunset', label: 'Pôr do sol', desc: 'Tons quentes de nascer do sol.', colorA: [255, 150, 60], colorB: [200, 40, 80] },
+  { value: 'ocean-deep', label: 'Oceano profundo', desc: 'Azuis do fundo do mar.', colorA: [0, 140, 160], colorB: [0, 20, 60] },
+  { value: 'aurora', label: 'Aurora boreal', desc: 'Verde e lilás no céu.', colorA: [60, 220, 160], colorB: [120, 60, 180] },
+  { value: 'monochrome', label: 'Monocromático', desc: 'Preto, branco e cinza.', colorA: [120, 120, 120], colorB: [20, 20, 20] },
+  { value: 'amoled-dark', label: 'AMOLED escuro', desc: 'Fundo totalmente preto, ultra baixo consumo.', colorA: [20, 20, 20], colorB: [0, 0, 0] },
 ];
 
 export const LOCKSCREEN_STYLES = [
@@ -141,3 +146,121 @@ export const COMPRESSION = [
   { value: 'zstd', label: 'zstd (rápido)', desc: 'Muito rápido e boa compressão.' },
   { value: 'lzo', label: 'lzo (rápido)', desc: 'Veloz, menor compressão.' },
 ];
+/** Mapeamento de pacotes REAIS por base de distribuição.
+ * Cada base tem seu próprio gerenciador/nome de pacote. Isso permite que o
+ * bootstrap instale o desktop e os apps selecionados de verdade.
+ */
+
+// Pacotes do ambiente de desktop por base (família Debian/Ubuntu/Mint).
+export const DESKTOP_PKGS = {
+  debian: {
+    kde: ['kde-plasma-desktop', 'plasma-workspace', 'sddm'],
+    gnome: ['gnome', 'gnome-shell', 'gdm3'],
+    xfce: ['xfce4', 'xfce4-goodies', 'lightdm'],
+    mate: ['mate-desktop-environment', 'mate-desktop-environment-extras', 'lightdm'],
+    cinnamon: ['cinnamon', 'lightdm'],
+    lxqt: ['lxqt', 'sddm'],
+    budgie: ['budgie-desktop', 'budgie-core', 'lightdm'],
+    cosmic: ['cosmic-desktop', 'systemd-boot'],
+    sway: ['sway', 'waybar', 'wofi'],
+    i3: ['i3-wm', 'i3status', 'i3lock', 'dmenu'],
+  },
+  ubuntu: {
+    kde: ['kubuntu-desktop'],
+    gnome: ['ubuntu-desktop'],
+    xfce: ['xubuntu-desktop'],
+    mate: ['ubuntu-mate-desktop'],
+    cinnamon: ['cinnamon-desktop-environment', 'lightdm'],
+    lxqt: ['lubuntu-desktop'],
+    budgie: ['budgie-desktop', 'budgie-core'],
+    cosmic: ['cosmic-desktop'],
+    sway: ['sway', 'waybar', 'wofi'],
+    i3: ['i3-wm', 'i3status', 'i3lock', 'dmenu'],
+  },
+  mint: {
+    cinnamon: ['mint-meta-cinnamon'],
+    mate: ['mint-meta-mate'],
+    xfce: ['mint-meta-xfce'],
+    kde: ['kde-plasma-desktop'],
+    gnome: ['gnome', 'gnome-shell', 'gdm3'],
+  },
+  // famílias RPM e outras — usam grupos/pacotes equivalentes
+  fedora: {
+    kde: ['@kde-desktop-environment'],
+    gnome: ['@gnome-desktop-environment'],
+    xfce: ['@xfce-desktop-environment'],
+    mate: ['@mate-desktop-environment'],
+    cinnamon: ['@cinnamon-desktop-environment'],
+    lxqt: ['@lxqt-desktop-environment'],
+    sway: ['sway', 'waybar'],
+    i3: ['i3', 'i3status', 'dmenu'],
+  },
+  opensuse: {
+    kde: ['patterns-kde-kde_plasma'],
+    gnome: ['patterns-gnome-gnome'],
+    xfce: ['patterns-xfce-xfce'],
+    mate: ['patterns-mate-mate'],
+    sway: ['sway', 'waybar'],
+    i3: ['i3', 'i3status'],
+  },
+  arch: {
+    kde: ['plasma-meta', 'sddm'],
+    gnome: ['gnome', 'gdm'],
+    xfce: ['xfce4', 'xfce4-goodies', 'lightdm-gtk-greeter'],
+    mate: ['mate', 'mate-extra', 'lightdm'],
+    cinnamon: ['cinnamon', 'lightdm'],
+    lxqt: ['lxqt', 'sddm'],
+    sway: ['sway', 'waybar', 'wofi'],
+    i3: ['i3-wm', 'i3status', 'i3lock', 'dmenu'],
+  },
+};
+
+// Apps escolhidos no assistente -> pacote real, por base.
+export const APP_PKGS = {
+  debian: {
+    firefox: ['firefox-esr'], chromium: ['chromium'], brave: ['brave-browser'],
+    vlc: ['vlc'], libreoffice: ['libreoffice'], gimp: ['gimp'], blender: ['blender'],
+    code: ['code'], neovim: ['neovim'], 'obs-studio': ['obs-studio'],
+    telegram: ['telegram-desktop'], discord: ['discord'], spotify: ['spotify'],
+    steam: ['steam'], 'gnome-terminal': ['gnome-terminal'], htop: ['htop'],
+    docker: ['docker.io'], git: ['git'], nodejs: ['nodejs', 'npm'], python3: ['python3', 'python3-pip'],
+    'gnome-software': ['gnome-software'], timeshift: ['timeshift'],
+  },
+  ubuntu: {
+    firefox: ['firefox'], chromium: ['chromium-browser'], brave: ['brave-browser'],
+    vlc: ['vlc'], libreoffice: ['libreoffice'], gimp: ['gimp'], blender: ['blender'],
+    code: ['code'], neovim: ['neovim'], 'obs-studio': ['obs-studio'],
+    telegram: ['telegram-desktop'], discord: ['discord'], spotify: ['spotify'],
+    steam: ['steam'], 'gnome-terminal': ['gnome-terminal'], htop: ['htop'],
+    docker: ['docker.io'], git: ['git'], nodejs: ['nodejs', 'npm'], python3: ['python3', 'python3-pip'],
+    'gnome-software': ['gnome-software'], timeshift: ['timeshift'],
+  },
+  arch: {
+    firefox: ['firefox'], chromium: ['chromium'], vlc: ['vlc'], libreoffice: ['libreoffice-still'],
+    gimp: ['gimp'], blender: ['blender'], code: ['code'], neovim: ['neovim'],
+    'obs-studio': ['obs-studio'], telegram: ['telegram-desktop'], discord: ['discord'],
+    spotify: ['spotify'], steam: ['steam'], 'gnome-terminal': ['gnome-terminal'],
+    htop: ['htop'], docker: ['docker'], git: ['git'], nodejs: ['nodejs', 'npm'],
+    python3: ['python', 'python-pip'], 'gnome-software': ['gnome-software'], timeshift: ['timeshift'],
+  },
+  fedora: {
+    firefox: ['firefox'], chromium: ['chromium'], vlc: ['vlc'], libreoffice: ['libreoffice'],
+    gimp: ['gimp'], blender: ['blender'], neovim: ['neovim'], 'obs-studio': ['obs-studio'],
+    telegram: ['telegram-desktop'], spotify: ['spotify'], steam: ['steam'],
+    'gnome-terminal': ['gnome-terminal'], htop: ['htop'], docker: ['docker'],
+    git: ['git'], nodejs: ['nodejs', 'npm'], python3: ['python3', 'pip'],
+    'gnome-software': ['gnome-software'],
+  },
+  opensuse: {
+    vlc: ['vlc'], libreoffice: ['libreoffice'], gimp: ['gimp'], blender: ['blender'],
+    neovim: ['neovim'], htop: ['htop'], git: ['git'], nodejs: ['nodejs'],
+    python3: ['python3'], 'gnome-terminal': ['gnome-terminal'],
+  },
+};
+
+export const DEFAULT_BASE_PKGS = {
+  debian: ['systemd', 'locales', 'tzdata', 'bash', 'coreutils', 'initramfs-tools', 'linux-image-amd64', 'grub-pc-bin', 'grub-efi-amd64-bin', 'squashfs-tools', 'xorg-server', 'mesa-utils'],
+  ubuntu: ['systemd', 'locales', 'tzdata', 'bash', 'coreutils', 'initramfs-tools', 'linux-image-generic', 'grub-pc-bin', 'grub-efi-amd64-bin', 'squashfs-tools', 'xorg-server', 'mesa-utils'],
+  mint: ['systemd', 'locales', 'tzdata', 'bash', 'coreutils', 'initramfs-tools', 'linux-image-generic', 'grub-pc-bin', 'grub-efi-amd64-bin', 'squashfs-tools'],
+  arch: ['base', 'linux', 'linux-firmware', 'grub', 'efibootmgr', 'squashfs-tools', 'xorg-server', 'mesa'],
+};
